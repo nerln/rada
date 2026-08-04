@@ -66,8 +66,9 @@ rada/store.py      stato JSON + lock atomico
 rada/sched.py      ammissione, anzianità, insieme obbligatorio, prenotazione
 rada/judge.py      il giudice e la sua validazione
 rada/setup_claude.py  install, uninstall, doctor
-tools/prova.py     76 controlli, un paio di secondi, nessun modello caricato
+tools/prova.py     78 controlli, un paio di secondi, nessun modello caricato
 tools/schermate.py rigenera le immagini del README da output vero
+tools/prova-giudice.py  prova viva di resistenza all'iniezione, chiama il modello
 ```
 
 ## Prima di ogni commit
