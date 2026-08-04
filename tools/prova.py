@@ -443,6 +443,19 @@ p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "rada"),
                     "run", "--", "exit 3"], capture_output=True, text=True, env=env)
 check("the child's exit code is passed through", p.returncode == 3, str(p.returncode))
 
+# A lone path with spaces must not be split by a shell.
+spacey = os.path.join(TMP, "a dir with spaces")
+os.makedirs(spacey, exist_ok=True)
+script = os.path.join(spacey, "script.sh")
+with open(script, "w") as f:
+    f.write("#!/bin/sh\necho spaced-ok\n")
+os.chmod(script, 0o755)
+p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "rada"),
+                    "run", "--need", "1M", "--", script],
+                   capture_output=True, text=True, env=env)
+check("a lone executable path containing spaces is run, not split",
+      "spaced-ok" in p.stdout, p.stdout[:80] + p.stderr[-200:])
+
 p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "rada"),
                     "run", "--", "definitely-not-a-command", "x"],
                    capture_output=True, text=True, env=env)

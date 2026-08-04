@@ -264,6 +264,14 @@ def cmd_run(args):
     elif args.command and len(args.command) > 1:
         argv = list(args.command)
         cmd = " ".join(argv)
+    elif args.command and os.path.isfile(args.command[0]) \
+            and os.access(args.command[0], os.X_OK):
+        # A lone argument that names a runnable file is that file, even when its path
+        # has spaces in it. Handing it to a shell would split it on the spaces and
+        # report that half a directory name does not exist, which is a confusing way
+        # to learn that you needed another layer of quotes.
+        argv = [args.command[0]]
+        cmd = args.command[0]
     else:
         cmd = args.command[0] if args.command else ""
     if not cmd.strip():
