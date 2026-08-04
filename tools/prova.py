@@ -301,12 +301,19 @@ def fake(stdout, rc=0):
 
 real_run = subprocess.run
 try:
+    def wrap(inner):
+        """what the runtime actually hands back around the model's answer"""
+        return json.dumps({"is_error": False, "type": "result",
+                           "structured_output": inner if isinstance(inner, dict) else None,
+                           "result": inner if isinstance(inner, str) else json.dumps(inner)})
+
     for label, payload, want_ok in (
-            ("a valid permutation", '{"order":["b","a"],"why":"ok"}', True),
-            ("an invented id", '{"order":["b","a","zzz"],"why":"x"}', False),
-            ("a missing id", '{"order":["b"],"why":"x"}', False),
-            ("a duplicate", '{"order":["b","b"],"why":"x"}', False),
-            ("prose instead of JSON", 'I think b should go first.', False),
+            ("a valid permutation", wrap({"order": ["b", "a"], "why": "ok"}), True),
+            ("an invented id", wrap({"order": ["b", "a", "zzz"], "why": "x"}), False),
+            ("a missing id", wrap({"order": ["b"], "why": "x"}), False),
+            ("a duplicate", wrap({"order": ["b", "b"], "why": "x"}), False),
+            ("prose instead of JSON", wrap("I think b should go first."), False),
+            ("a runtime error", json.dumps({"is_error": True, "subtype": "boom"}), False),
             ("an empty answer", '', False)):
         subprocess.run = lambda *a, **k: fake(payload)
         order, why = judge.ask(tickets)
