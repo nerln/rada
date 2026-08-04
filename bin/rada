@@ -281,8 +281,13 @@ def cmd_run(args):
     def run_now():
         return subprocess.call(argv or ["/bin/sh", "-c", cmd])
 
-    # An explicit escape hatch, also used to stop the judge from gating itself.
+    # An explicit escape hatch, also used to stop the judge from gating itself. It must
+    # not swallow --dry-run: asking what would happen and being given the thing itself
+    # is the worst possible answer, and it already happened once.
     if os.environ.get("RADA_DISABLE") == "1":
+        if args.dry_run:
+            print("decision: run because rada is disabled by RADA_DISABLE=1")
+            return 0
         return run_now()
 
     w = Waiter(cmd, need=args.need, note=args.note, max_wait=args.max, argv=argv)

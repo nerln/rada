@@ -462,6 +462,12 @@ p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "rada"),
 check("a command that does not exist says so and exits 127",
       p.returncode == 127 and "not found" in p.stderr, f"{p.returncode} {p.stderr[-160:]}")
 
+p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "rada"),
+                    "run", "--dry-run", "--", "touch", os.path.join(TMP, "must-not-exist")],
+                   capture_output=True, text=True, env=dict(env, RADA_DISABLE="1"))
+check("--dry-run does not run the command even when rada is disabled",
+      not os.path.exists(os.path.join(TMP, "must-not-exist")), p.stdout[:150])
+
 p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "rada"), "status"],
                    capture_output=True, text=True, env=env)
 check("status runs", p.returncode == 0, p.stderr[:200])
