@@ -103,11 +103,16 @@ processi mentre gira e ricorda il picco, indicizzato su una firma del comando co
 cancellati, così rilanciare lo stesso script con un altro learning rate eredita quello che
 si era imparato. Se lo sai già, dichiaralo con `--need 6G`.
 
-Quando il job in testa non ci sta neanche nel budget di una macchina vuota, rada prenota:
-smette di ammettere qualunque cosa mangerebbe la sua quota e lascia che la macchina si
-svuoti, facendo passare sotto solo i job brevi. Se dopo sette minuti la testa ancora non ci
-sta, rada molla la prenotazione con un'attesa crescente, dice quali processi tengono la
-memoria, e intanto lascia lavorare gli altri.
+Quando il job in testa non ci sta, rada prima si chiede se aspettare possa servire a
+qualcosa: una prenotazione libera solo la memoria che rada stessa ha concesso, quindi se il
+job non ci starebbe neanche dopo che tutti i job in coda hanno finito, quella memoria e' di
+programmi fuori dalla coda e tenere fermi gli altri non ottiene niente. In quel caso rada
+dice quali programmi la tengono e aspetta senza bloccare nessuno.
+
+Quando invece drenare potrebbe bastare, rada prenota: smette di ammettere qualunque cosa
+mangerebbe la sua quota e lascia che la macchina si svuoti, facendo passare sotto solo i
+job brevi. Se dopo sette minuti la testa ancora non ci sta, molla la prenotazione con
+un'attesa crescente e intanto lascia lavorare gli altri.
 
 ## Installazione
 

@@ -101,11 +101,16 @@ footprint while it runs and remembers the peak against a signature of the comman
 numbers erased, so re-running the same script with a different learning rate inherits what
 was learned. Declare it yourself with `--need 6G` when you already know.
 
-When the job at the head of the queue does not fit even in an empty machine's budget,
-rada reserves: it stops admitting anything that would eat the head's share and lets the
-machine drain, allowing only short jobs to slip underneath. If the head still does not fit
-after seven minutes, rada gives up the reservation with a growing cooldown, says which
-processes are holding the memory, and lets everyone else run in the meantime.
+When the job at the head of the queue does not fit, rada first asks whether waiting
+could ever help: a reservation only frees memory that rada itself handed out, so if the
+job would not fit even after every queued job had finished, the memory belongs to programs
+outside the queue and holding everyone back achieves nothing. In that case rada says which
+programs are holding it and waits without blocking anybody.
+
+When draining could get there, rada reserves: it stops admitting anything that would eat
+the head's share and lets the machine drain, allowing only short jobs to slip underneath.
+If the head still does not fit after seven minutes, rada gives up the reservation with a
+growing cooldown and lets everyone else run in the meantime.
 
 ## Install
 

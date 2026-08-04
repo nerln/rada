@@ -348,30 +348,58 @@ try:
     mk(d, "small", age=10, need=1 * GB, now=now)
     check("a job that fits is admitted", sched.decide(d, "small", now)["go"])
 
+    # The head does not fit now, but two running jobs hold enough that draining would
+    # get there, so reserving is worth doing and the queue holds still for it.
     stub_mem(2 * GB)
+    sched.committed = lambda dd: 6 * GB if dd["leases"] else 0
     d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    d["leases"]["r1"] = {"need": 6 * GB, "pid": os.getpid(), "pgid": None,
+                         "start": now, "sig": "r1"}
     mk(d, "big", age=100, need=6 * GB, now=now)
     mk(d, "small", age=1, need=1 * GB, now=now)
     r_big = sched.decide(d, "big", now)
-    check("a job that does not fit waits", not r_big["go"])
-    check("the waiting head takes a reservation", (d.get("reserve") or {}).get("id") == "big")
+    check("a job that does not fit waits", not r_big["go"], str(r_big)[:160])
+    check("the waiting head takes a reservation when draining could get there",
+          (d.get("reserve") or {}).get("id") == "big", str(d.get("reserve")))
     r_small = sched.decide(d, "small", now)
-    check("a second job is held back by the reservation", not r_small["go"], str(r_small))
+    check("a second job is held back by the reservation", not r_small["go"], str(r_small)[:160])
 
     # a short job may slip underneath if it does not eat the head's share
+    sched.committed = lambda dd: 0
     stub_mem(9 * GB)
     d["learn"] = {"small": {"dur_p95": 5.0, "p95": 1 * GB, "n": 3, "max": 1 * GB}}
     r_small = sched.decide(d, "small", now)
     check("a short job backfills under a reservation when there is room",
-          r_small["go"], str(r_small))
+          r_small["go"], str(r_small)[:160])
 
     d["learn"] = {"small": {"dur_p95": 9999.0, "p95": 1 * GB, "n": 3, "max": 1 * GB}}
     check("a long job does not backfill", not sched.decide(d, "small", now)["go"])
 
+    # A job that cannot fit even after every queued job finishes must not reserve at
+    # all, because the memory is held by programs the queue does not manage.
+    stub_mem(2 * GB)
+    sched.committed = lambda dd: 0
+    d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d, "toobig", age=100, need=9 * GB, now=now)
+    mk(d, "little", age=1, need=200 * 1024 ** 2, now=now)
+    r = sched.decide(d, "toobig", now)
+    check("a job the machine cannot free room for does not reserve",
+          not r["go"] and r.get("impossible_for_now") is True, str(r)[:200])
+    check("and it says which programs are holding the memory",
+          "blockers" in r.get("facts", {}))
+    check("no reservation was taken", not (d.get("reserve") or {}).get("id"))
+    check("so a smaller job behind it still runs", sched.decide(d, "little", now)["go"],
+          str(sched.decide(d, "little", now))[:200])
+
     # a reservation that can never be satisfied gives up instead of freezing the machine
     stub_mem(1 * GB)
     d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
-    mk(d, "huge", age=100, need=64 * GB, now=now)
+    mk(d, "huge", age=100, need=3 * GB, now=now)
+    # three gigabytes are already promised to a running job, so draining could in
+    # principle get there and reserving is the right thing to try
+    d["leases"]["running"] = {"need": 3 * GB, "pid": os.getpid(), "pgid": None,
+                              "start": now, "sig": "r"}
+    sched.committed = lambda dd: 0 if not dd["leases"] else 3 * GB
     sched.decide(d, "huge", now)
     later = now + sched.RESERVE_MAX + 1
     r = sched.decide(d, "huge", later)

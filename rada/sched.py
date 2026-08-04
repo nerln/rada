@@ -169,7 +169,27 @@ def decide(d, tid, now=None):
         if _fits(need, free):
             d["reserve"] = {}
             return {"go": True, "why": "head of queue and it fits", "facts": facts}
-        # The head does not fit. Hold the machine open for it.
+
+        # Before reserving, ask whether reserving could possibly work. A reservation
+        # only frees memory that rada itself handed out. If the job would not fit even
+        # after every rada job on the machine had finished, then the memory is held by
+        # something rada does not manage, an editor, a simulator, the browser, and
+        # holding the queue shut waits for something that is not coming while everyone
+        # else is blocked. This happened: a six gigabyte experiment reserved for three
+        # and a half hours on a machine whose other eleven gigabytes belonged to open
+        # applications, and eight unrelated jobs from other sessions queued behind it.
+        drainable = snap["budget"] + committed(d)
+        if not _fits(need, drainable):
+            d["reserve"] = {}
+            facts["blockers"] = mem.top_consumers(4)
+            facts["drainable"] = drainable
+            return {"go": False, "impossible_for_now": True, "facts": facts,
+                    "why": (f"needs {mem.human(need)} and at most {mem.human(drainable)} "
+                            f"could be freed by waiting for other queued jobs, so the "
+                            f"rest is held by programs outside the queue; waiting "
+                            f"without holding anyone else back")}
+
+        # The head does not fit, but draining could get it there. Hold the machine open.
         if not res or res.get("id") != tid:
             d["reserve"] = {"id": tid, "since": now, "fails": (res.get("fails", 0))}
             res = d["reserve"]

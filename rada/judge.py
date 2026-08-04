@@ -29,8 +29,9 @@ import time
 from . import store
 
 TTL = 180.0            # a verdict is good for this long
-TIMEOUT = 45.0         # a judge that has not answered by now is not going to
+TIMEOUT = 90.0         # a judge that has not answered by now is not going to
 MIN_QUEUE = 2          # nothing to judge below this
+MAX_TICKETS = 12       # never ask about more than this many at once
 MODEL = os.environ.get("RADA_JUDGE_MODEL", "haiku")
 
 PROMPT = """You are the harbourmaster of a queue of shell jobs on one developer laptop.
@@ -162,6 +163,13 @@ def run_and_record(tid):
         st.d["judge"]["running_pid"] = os.getpid()
         st.d["judge"]["running_ts"] = now
         tickets = dict(st.d["tickets"])
+
+    # Ask about the oldest few only. A queue of twenty makes a long prompt, a slow
+    # answer and a permutation the model is more likely to get wrong, and the jobs
+    # near the back are going to be reordered again before their turn comes anyway.
+    if len(tickets) > MAX_TICKETS:
+        oldest = sorted(tickets, key=lambda t: tickets[t].get("enq", 0))[:MAX_TICKETS]
+        tickets = {t: tickets[t] for t in oldest}
 
     order, why = ask(tickets)
 
