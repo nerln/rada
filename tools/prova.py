@@ -431,6 +431,12 @@ finally:
 section("6. learning what a job costs")
 
 d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+# A declared size gets a narrower margin than a guessed one.
+check("a declared need is admitted on a tighter margin",
+      sched._fits(6 * GB, int(6.7 * GB), declared=True)
+      and not sched._fits(6 * GB, int(6.7 * GB), declared=False),
+      "the declared and estimated margins behave the same")
+
 check("with nothing learned the estimate is the default",
       sched.estimate(d, "unseen") == sched.DEFAULT_NEED)
 check("a declared size wins", sched.estimate(d, "unseen", declared=3 * GB) == 3 * GB)

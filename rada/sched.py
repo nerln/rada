@@ -130,8 +130,19 @@ def order(d, now=None):
     return mandatory + rest
 
 
-def _fits(need, free):
-    return need * HEADROOM <= free
+DECLARED_HEADROOM = 1.10
+
+
+def _fits(need, free, declared=False):
+    """Admit only with a margin over the estimate.
+
+    The margin is wider for a number rada guessed than for one a person typed. A learned
+    footprint is a peak observed at some sampling rate on some earlier run, and the true
+    peak between samples is always a little higher; a declared number is what the person
+    running the job believes it takes, and doubling their margin on top of their own is
+    how a job that would have fitted ends up waiting for room it did not need.
+    """
+    return need * (DECLARED_HEADROOM if declared else HEADROOM) <= free
 
 
 def decide(d, tid, now=None):
@@ -151,6 +162,7 @@ def decide(d, tid, now=None):
 
     free = snap["budget"] - committed(d)
     need = tk.get("need") or DEFAULT_NEED
+    declared = bool(tk.get("declared"))
     q = order(d, now)
     pos = q.index(tid) if tid in q else 0
     head = q[0] if q else tid
@@ -166,7 +178,7 @@ def decide(d, tid, now=None):
         res = {}
 
     if tid == head:
-        if _fits(need, free):
+        if _fits(need, free, declared):
             d["reserve"] = {}
             return {"go": True, "why": "head of queue and it fits", "facts": facts}
 
@@ -179,7 +191,7 @@ def decide(d, tid, now=None):
         # and a half hours on a machine whose other eleven gigabytes belonged to open
         # applications, and eight unrelated jobs from other sessions queued behind it.
         drainable = snap["budget"] + committed(d)
-        if not _fits(need, drainable):
+        if not _fits(need, drainable, declared):
             d["reserve"] = {}
             facts["blockers"] = mem.top_consumers(4)
             facts["drainable"] = drainable
@@ -214,14 +226,14 @@ def decide(d, tid, now=None):
         head_need = d["tickets"].get(res["id"], {}).get("need", 0)
         short = (d.get("learn", {}).get(tk.get("sig", ""), {}).get("dur_p95", 1e9)
                  <= BACKFILL_MAX_SECONDS)
-        if _fits(need, free - head_need) and short:
+        if _fits(need, free - head_need, declared) and short:
             return {"go": True, "why": "short job, fits underneath the reservation",
                     "facts": facts}
         return {"go": False, "facts": facts,
                 "why": (f"holding memory for a larger job that has waited "
                         f"{int(now - d['tickets'].get(res['id'], {}).get('enq', now))}s")}
 
-    if _fits(need, free):
+    if _fits(need, free, declared):
         return {"go": True, "why": "fits and nothing is reserving", "facts": facts}
     return {"go": False, "facts": facts,
             "why": (f"needs {mem.human(need)}, only {mem.human(free)} free"
