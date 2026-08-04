@@ -145,6 +145,33 @@ def _fits(need, free, declared=False):
     return need * (DECLARED_HEADROOM if declared else HEADROOM) <= free
 
 
+STUCK_AFTER = 300.0        # a job stuck this long is worth telling a person about
+
+
+def forced_ready(d, tk, now):
+    """Has a person told this job to go, and is its condition met?
+
+    A forced job ignores the memory budget and the queue order. That is the point: the
+    person at the keyboard knows something the scheduler does not, usually that they are
+    about to close an editor, or that they would rather swap for two minutes than wait
+    another hour. The fairness guarantee in this file is about the decisions rada makes
+    on its own; a human override is outside it, and `rada status` says when one is in
+    force so it is never a mystery why something jumped.
+    """
+    f = tk.get("force")
+    if not f:
+        return False, None
+    after = f.get("after")
+    if after:
+        if after in d["leases"] or after in d["tickets"]:
+            return False, f"forced, waiting for {after} to finish first"
+        return True, "forced by you, and the job it waits for has finished"
+    at = f.get("at", 0)
+    if at > now:
+        return False, f"forced, starting in {int(at - now)}s"
+    return True, "forced by you"
+
+
 def decide(d, tid, now=None):
     """Should ticket `tid` start right now?
 
@@ -155,6 +182,12 @@ def decide(d, tid, now=None):
     tk = d["tickets"].get(tid)
     if tk is None:
         return {"go": True, "why": "ticket vanished, running ungated"}
+
+    ready, note = forced_ready(d, tk, now)
+    if ready:
+        return {"go": True, "why": note, "forced": True}
+    if note:
+        return {"go": False, "why": note, "forced": True, "facts": {"pos": 1, "queued": len(d["tickets"])}}
 
     snap = mem.snapshot()
     if snap.get("unknown_platform"):
@@ -195,6 +228,7 @@ def decide(d, tid, now=None):
             d["reserve"] = {}
             facts["blockers"] = mem.top_consumers(4)
             facts["drainable"] = drainable
+            facts["stuck"] = (now - tk.get("enq", now)) > STUCK_AFTER
             return {"go": False, "impossible_for_now": True, "facts": facts,
                     "why": (f"needs {mem.human(need)} and at most {mem.human(drainable)} "
                             f"could be freed by waiting for other queued jobs, so the "

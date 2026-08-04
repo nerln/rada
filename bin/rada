@@ -9,6 +9,8 @@ Usage:
   rada install | uninstall       register or remove the Claude Code hook
   rada doctor                    check the installation
   rada judge                     run the judge once, for debugging
+  rada force <id>                start a queued job now, ignoring the memory budget
+  rada force <id> --after <id>   start it once another job has finished
   rada reset                     forget all state
 
 Options for run:
@@ -22,6 +24,7 @@ because it is confused is worse than no scheduler.
 """
 import argparse
 import hashlib
+import json
 import os
 import re
 import signal
@@ -135,7 +138,7 @@ class Waiter:
         """Block until admitted. Returns the reason it may go."""
         t0 = time.time()
         last_msg, msg_every = 0.0, 20.0
-        judged = False
+        judged = told_stuck = False
         while True:
             do_judge = False
             with store.Transaction() as st:
@@ -176,9 +179,19 @@ class Waiter:
             now = time.time()
             if self.max_wait and now - t0 > self.max_wait:
                 return f"waited {int(now - t0)}s, the limit you set, running anyway"
+            f = d.get("facts", {})
+            if f.get("stuck") and not told_stuck:
+                told_stuck = True
+                notify("rada: a job is stuck",
+                       f"{self.tid} has waited {int(now - t0) // 60} min and needs "
+                       f"{mem.human(self.need)} the machine cannot free. "
+                       f"Run: rada force {self.tid}")
+                self._say(f"this job cannot fit while other programs hold the memory.")
+                self._say(f"    to start it anyway:  rada force {self.tid}")
+                for b in (f.get("blockers") or [])[:3]:
+                    self._say(f"    {b['name']} is holding {mem.human(b['bytes'])}")
             if now - last_msg > msg_every:
                 last_msg = now
-                f = d.get("facts", {})
                 pos = f.get("pos", "?")
                 self._say(f"waiting {int(now - t0)}s, position {pos} of "
                           f"{f.get('queued','?')}: {d.get('why','')}")
@@ -384,6 +397,14 @@ def cmd_status(args):
             print(f" {flag}{i:>2}. {tid}  {int(age):>5}s  "
                   f"{mem.human(tk.get('need')):>8}  {tk.get('project','?'):<14} "
                   f"{tk.get('show','')[:55]}")
+        for tid in q:
+            tk = d["tickets"][tid]
+            f = tk.get("force")
+            if f:
+                when = (f"after {f['after']}" if f.get("after")
+                        else ("now" if f.get("at", 0) <= now
+                              else f"in {int(f['at'] - now)}s"))
+                print(f"  {tid} is forced: starts {when}, ignoring the budget")
         res = d.get("reserve") or {}
         if res.get("id"):
             print(f"  reserving memory for {res['id']}")
@@ -438,6 +459,64 @@ def cmd_reset(args):
     return 0
 
 
+def notify(title, body, url=None):
+    """Tell the person, through the desktop, once.
+
+    A queued job that cannot fit is invisible: it is a background process printing to a
+    log nobody is reading. Waiting silently for an hour is the worst behaviour available,
+    because the one thing that would fix it, closing an editor or saying go anyway, is
+    something only a person can do and only if they know.
+    """
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification {json.dumps(body)} with title {json.dumps(title)}'],
+            capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+def cmd_force(args):
+    with store.Transaction() as st:
+        if not st.ok:
+            print("could not take the lock", file=sys.stderr)
+            return 1
+        sched.reap(st.d)
+        matches = [t for t in st.d["tickets"] if t.startswith(args.ticket)]
+        if not matches:
+            running = [t for t in st.d["leases"] if t.startswith(args.ticket)]
+            print(f"no waiting job starts with {args.ticket!r}"
+                  + (" (it is already running)" if running else ""), file=sys.stderr)
+            return 1
+        if len(matches) > 1:
+            print(f"{args.ticket!r} matches {', '.join(matches)}; be more specific",
+                  file=sys.stderr)
+            return 1
+        tid = matches[0]
+        if args.cancel:
+            st.d["tickets"][tid].pop("force", None)
+            print(f"{tid} is back in the ordinary queue")
+            return 0
+        f = {}
+        if args.after:
+            others = [t for t in list(st.d["tickets"]) + list(st.d["leases"])
+                      if t.startswith(args.after) and t != tid]
+            if not others:
+                print(f"no job starts with {args.after!r}", file=sys.stderr)
+                return 1
+            f["after"] = others[0]
+            when = f"once {others[0]} has finished"
+        else:
+            f["at"] = time.time() + (args.in_ or 0)
+            when = "now" if not args.in_ else f"in {int(args.in_)}s"
+        st.d["tickets"][tid]["force"] = f
+        show = st.d["tickets"][tid].get("show", "")[:70]
+        store.log(f"forced {tid} {when}: {show}")
+    print(f"{tid} will start {when}, ignoring the memory budget")
+    print(f"  {show}")
+    return 0
+
+
 def cmd_mode(args):
     from rada import setup_claude
     if not args.which:
@@ -475,6 +554,15 @@ def main(argv=None):
     s = sub.add_parser("reset", help="forget queue state")
     s.add_argument("--all", action="store_true", help="also forget learned footprints")
     s.set_defaults(fn=cmd_reset)
+
+    s = sub.add_parser("force", help="start a queued job now, ignoring the memory budget")
+    s.add_argument("ticket", help="the ticket id, or enough of its start to be unique")
+    s.add_argument("--in", dest="in_", type=float, metavar="SECONDS",
+                   help="wait this long first")
+    s.add_argument("--after", metavar="TICKET",
+                   help="wait until that job has finished, then go")
+    s.add_argument("--cancel", action="store_true", help="undo a force")
+    s.set_defaults(fn=cmd_force)
 
     s = sub.add_parser("mode", help="gate (queue heavy commands) or advise (do nothing)")
     s.add_argument("which", nargs="?", choices=["gate", "advise"])

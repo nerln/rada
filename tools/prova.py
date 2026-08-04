@@ -535,6 +535,53 @@ check(f"the gate is cheap for ordinary commands ({per:.0f}ms each)", per < 60,
       f"{per:.0f}ms")
 
 
+# ------------------------------------------------------------------ 7b. forcing a job
+
+section("7b. forcing a job past the budget")
+
+fresh()
+GB = 1024 ** 3
+real_snapshot2 = mem.snapshot
+mem.snapshot = lambda *a, **k: {"budget": 100, "used": 0, "reserve": 0, "pressure": 1,
+                                "jetsam": 90, "swap_used": 0, "swap_total": 0,
+                                "clamped": [], "unknown_platform": False}
+try:
+    d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d, "big", age=10, need=9 * GB, now=now)
+    check("without a force it waits", not sched.decide(d, "big", now)["go"])
+
+    d["tickets"]["big"]["force"] = {"at": now - 1}
+    r = sched.decide(d, "big", now)
+    check("a forced job goes even though it does not fit", r["go"] and r.get("forced"))
+
+    d["tickets"]["big"]["force"] = {"at": now + 60}
+    r = sched.decide(d, "big", now)
+    check("a force with a delay waits for the delay", not r["go"] and r.get("forced"))
+    check("and says how long is left", "60s" in r["why"], r["why"])
+
+    d["leases"]["other"] = {"need": 1, "pid": os.getpid(), "pgid": None, "start": now}
+    d["tickets"]["big"]["force"] = {"after": "other"}
+    check("a force that waits for another job holds while that job runs",
+          not sched.decide(d, "big", now)["go"])
+    d["leases"].pop("other")
+    r = sched.decide(d, "big", now)
+    check("and goes once that job is gone", r["go"], str(r)[:120])
+
+    # the stuck flag is what triggers the notification
+    d2 = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d2, "hopeless", age=sched.STUCK_AFTER + 10, need=9 * GB, now=now)
+    r = sched.decide(d2, "hopeless", now)
+    check("a job stuck past the threshold is flagged for a person",
+          r.get("facts", {}).get("stuck") is True, str(r.get("facts"))[:160])
+finally:
+    mem.snapshot = real_snapshot2
+
+p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "rada"), "force", "zzzz"],
+                   capture_output=True, text=True, env=env)
+check("forcing an unknown ticket fails clearly",
+      p.returncode == 1 and "no waiting job" in p.stderr, p.stderr[:120])
+
+
 # ------------------------------------------------------- 8. real contention, real processes
 
 section("8. two waiters, one berth")
