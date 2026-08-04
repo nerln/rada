@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""rada: wait for a berth before running a heavy job.
+
+Usage:
+  rada run -- <command>          run a command once memory allows
+  rada run --ticket <nonce>      the form the hook rewrites into, reads the saved command
+  rada status                    what is running, what is waiting, and why
+  rada watch                     status, refreshed
+  rada install | uninstall       register or remove the Claude Code hook
+  rada doctor                    check the installation
+  rada judge                     run the judge once, for debugging
+  rada reset                     forget all state
+
+Options for run:
+  --need 6G       declare the memory this job needs, instead of letting rada estimate
+  --note "text"   one line telling the judge what this job is for
+  --max 3600      give up waiting after this many seconds and run anyway
+  --dry-run       report the decision and exit without running
+
+Anything that goes wrong in rada lets the command run. A scheduler that blocks work
+because it is confused is worse than no scheduler.
+"""
+import argparse
+import hashlib
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from rada import __version__, mem, judge, sched, store  # noqa: E402
+
+POLL = 3.0
+HEARTBEAT = 5.0
+
+
+def parse_bytes(s):
+    if s is None:
+        return None
+    m = re.fullmatch(r"\s*([\d.]+)\s*([kKmMgGtT]?)[bB]?\s*", str(s))
+    if not m:
+        raise argparse.ArgumentTypeError(f"cannot read {s!r} as a size, try 6G or 512M")
+    mult = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
+    return int(float(m.group(1)) * mult[m.group(2).lower()])
+
+
+def signature(cmd):
+    """A stable key for 'the same job again'.
+
+    Numbers are erased before hashing, so re-running a training script with a different
+    learning rate or seed counts as the same job and inherits its learned footprint and
+    its place in the ageing scheme. Long argument lists are truncated for the same reason.
+    """
+    t = re.sub(r"\s+", " ", cmd).strip()
+    t = re.sub(r"[0-9]+", "#", t)
+    t = re.sub(r"/[^\s]*/", "/", t)
+    return hashlib.sha1(t[:400].encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def project_of(cwd):
+    cwd = cwd or os.getcwd()
+    p = cwd
+    for _ in range(6):
+        if os.path.isdir(os.path.join(p, ".git")):
+            return os.path.basename(p)
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    return os.path.basename(cwd)
+
+
+def new_id():
+    return hashlib.sha1(f"{os.getpid()}{time.time()}".encode()).hexdigest()[:8]
+
+
+# --------------------------------------------------------------------------- the wrapper
+
+class Waiter:
+    """Holds a queue ticket and, once admitted, runs and supervises the job.
+
+    `argv` decides how the job is started, and the rule is the one `nice` and `env` use.
+    A list of two or more words is executed as it stands, with no shell, so quoting is
+    never doubled and nothing is re-parsed. A single string, which is what the hook saves
+    and what `rada run -- "a && b"` produces, is handed to /bin/sh, because a string is
+    the only form in which a user can have meant shell syntax.
+    """
+
+    def __init__(self, cmd, need=None, note=None, max_wait=None, cwd=None, sid=None,
+                 argv=None):
+        self.cmd = cmd
+        self.argv = argv
+        self.declared = need
+        self.note = note
+        self.max_wait = max_wait
+        self.cwd = cwd or os.getcwd()
+        self.sid = sid or os.environ.get("RADA_SID", "")
+        self.tid = new_id()
+        self.sig = signature(cmd)
+        self.granted = False
+        self.child = None
+        self.pgid = None
+
+    def _say(self, msg):
+        print(f"[rada] {msg}", file=sys.stderr, flush=True)
+
+    def enqueue(self):
+        with store.Transaction() as st:
+            if not st.ok:
+                return False
+            sched.reap(st.d)
+            need = sched.estimate(st.d, self.sig, self.declared)
+            show = re.sub(r"\s+", " ", self.cmd)[:200]
+            st.d["tickets"][self.tid] = {
+                "sid": self.sid, "cwd": self.cwd, "project": project_of(self.cwd),
+                "sig": self.sig, "show": show, "need": need, "enq": time.time(),
+                "pid": os.getpid(), "seen": time.time(), "intent": self.note,
+                "declared": bool(self.declared)}
+            self.need = need
+            store.log(f"queued {self.tid} need={mem.human(need)} "
+                      f"declared={bool(self.declared)} sig={self.sig} {show[:60]}")
+            return True
+
+    def dequeue(self):
+        with store.Transaction() as st:
+            if st.ok:
+                st.d["tickets"].pop(self.tid, None)
+                if (st.d.get("reserve") or {}).get("id") == self.tid:
+                    st.d["reserve"] = {}
+
+    def wait(self):
+        """Block until admitted. Returns the reason it may go."""
+        t0 = time.time()
+        last_msg, msg_every = 0.0, 20.0
+        judged = False
+        while True:
+            do_judge = False
+            with store.Transaction() as st:
+                if not st.ok:
+                    return "scheduler unavailable, running anyway"
+                sched.reap(st.d)
+                tk = st.d["tickets"].get(self.tid)
+                if tk is None:
+                    # reaped while we were away; put ourselves back
+                    st.d["tickets"][self.tid] = {
+                        "sid": self.sid, "cwd": self.cwd, "project": project_of(self.cwd),
+                        "sig": self.sig, "show": re.sub(r"\s+", " ", self.cmd)[:200],
+                        "need": self.need, "enq": t0, "pid": os.getpid(),
+                        "seen": time.time(), "intent": self.note}
+                else:
+                    tk["seen"] = time.time()
+                d = sched.decide(st.d, self.tid)
+                if d.get("go"):
+                    # The berth is taken here, in the same transaction that granted it.
+                    # Deciding in one transaction and recording in the next leaves a
+                    # window in which two waiters are both told to go, which is the one
+                    # race that makes the whole tool pointless. The process id is our
+                    # own until the child exists; the group id is filled in by start().
+                    sched.grant(st.d, self.tid, os.getpid(), None)
+                    self.granted = True
+                    return d.get("why", "admitted")
+                if not judged and judge.duty(st.d, self.tid):
+                    do_judge = True
+
+            if do_judge:
+                judged = True
+                try:
+                    judge.run_and_record(self.tid)
+                except Exception as e:
+                    store.log(f"judge crashed, ignoring: {e}")
+                continue
+
+            now = time.time()
+            if self.max_wait and now - t0 > self.max_wait:
+                return f"waited {int(now - t0)}s, the limit you set, running anyway"
+            if now - last_msg > msg_every:
+                last_msg = now
+                f = d.get("facts", {})
+                pos = f.get("pos", "?")
+                self._say(f"waiting {int(now - t0)}s, position {pos} of "
+                          f"{f.get('queued','?')}: {d.get('why','')}")
+                for b in (f.get("blockers") or [])[:3]:
+                    self._say(f"    memory held by {b['name']} ({mem.human(b['bytes'])})")
+                judged = False   # allow a fresh verdict once the old one expires
+            time.sleep(POLL)
+
+    def start(self):
+        """Start the child. The berth was already taken in wait(); this fills in who holds it."""
+        try:
+            self.child = subprocess.Popen(self.argv or ["/bin/sh", "-c", self.cmd],
+                                          start_new_session=True)
+        except FileNotFoundError:
+            name = (self.argv or [""])[0]
+            self._say(f"command not found: {name}")
+            self.release()
+            raise SystemExit(127)
+        except OSError as e:
+            self._say(f"could not start the command: {e}")
+            self.release()
+            raise SystemExit(126)
+        try:
+            self.pgid = os.getpgid(self.child.pid)
+        except Exception:
+            self.pgid = self.child.pid
+        with store.Transaction() as st:
+            if st.ok:
+                ls = st.d["leases"].get(self.tid)
+                if ls is not None:
+                    ls["pid"], ls["pgid"] = self.child.pid, self.pgid
+                    ls["start"] = time.time()
+                else:
+                    sched.grant(st.d, self.tid, self.child.pid, self.pgid)
+
+    def supervise(self):
+        """Wait for the child, sampling the peak footprint of its whole process group."""
+        peak, t0, last_beat = 0, time.time(), 0.0
+        while self.child.poll() is None:
+            try:
+                cur = mem.group_footprint(self.pgid)
+                peak = max(peak, cur)
+            except Exception:
+                pass
+            now = time.time()
+            if now - last_beat > HEARTBEAT:
+                last_beat = now
+                with store.Transaction(timeout=2.0) as st:
+                    if st.ok and self.tid in st.d["leases"]:
+                        st.d["leases"][self.tid]["seen"] = now
+                        st.d["leases"][self.tid]["peak"] = peak
+            time.sleep(0.25)
+        rc = self.child.wait()
+        with store.Transaction() as st:
+            if st.ok:
+                sched.finish(st.d, self.tid, peak, time.time() - t0)
+        if peak:
+            self._say(f"done in {int(time.time()-t0)}s, peak {mem.human(peak)}")
+        return rc
+
+    def release(self):
+        with store.Transaction(timeout=3.0) as st:
+            if st.ok:
+                st.d["leases"].pop(self.tid, None)
+                st.d["tickets"].pop(self.tid, None)
+
+
+def cmd_run(args):
+    argv = None
+    if args.ticket:
+        path = store.pending_path(args.ticket)
+        try:
+            with open(path) as f:
+                cmd = f.read()
+        except Exception as e:
+            print(f"[rada] cannot read the saved command ({e}); nothing to run",
+                  file=sys.stderr)
+            return 127
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    elif args.command and len(args.command) > 1:
+        argv = list(args.command)
+        cmd = " ".join(argv)
+    else:
+        cmd = args.command[0] if args.command else ""
+    if not cmd.strip():
+        print("[rada] no command given", file=sys.stderr)
+        return 2
+
+    def run_now():
+        return subprocess.call(argv or ["/bin/sh", "-c", cmd])
+
+    # An explicit escape hatch, also used to stop the judge from gating itself.
+    if os.environ.get("RADA_DISABLE") == "1":
+        return run_now()
+
+    w = Waiter(cmd, need=args.need, note=args.note, max_wait=args.max, argv=argv)
+
+    try:
+        if not w.enqueue():
+            print("[rada] scheduler unavailable, running now", file=sys.stderr)
+            return run_now()
+    except store.SchemaMismatch as e:
+        print(f"[rada] {e}; running now", file=sys.stderr)
+        return run_now()
+    except Exception as e:
+        store.log(f"enqueue failed: {e}")
+        return run_now()
+
+    def bail(signum, frame):
+        if w.child and w.child.poll() is None:
+            try:
+                os.killpg(w.pgid, signum)
+            except Exception:
+                pass
+        w.release()
+        sys.exit(128 + signum)
+
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(s, bail)
+        except Exception:
+            pass
+
+    try:
+        if args.dry_run:
+            with store.Transaction() as st:
+                d = sched.decide(st.d, w.tid) if st.ok else {"go": True}
+            w.dequeue()
+            print(f"decision: {'run' if d.get('go') else 'wait'} because {d.get('why')}")
+            print(f"facts: {d.get('facts')}")
+            return 0
+        why = w.wait()
+        w._say(f"starting: {why}")
+        w.start()
+        return w.supervise()
+    except Exception as e:
+        store.log(f"wrapper failed after enqueue, running unscheduled: {e}")
+        w.release()
+        return run_now()
+    finally:
+        w.release()
+
+
+# --------------------------------------------------------------------------------- views
+
+def cmd_status(args):
+    try:
+        d = store.read()
+    except store.SchemaMismatch as e:
+        print(f"state written by another version of rada ({e.found}); "
+              f"run `rada reset` if that version is gone")
+        return 1
+    now = time.time()
+    snap = mem.snapshot()
+    com = sched.committed(d)
+    print(f"rada {__version__}   budget {mem.human(snap['budget'])}"
+          f"   promised {mem.human(com)}   free {mem.human(snap['budget'] - com)}")
+    print(f"  memory used {mem.human(snap['used'])} of {mem.human(mem.TOTAL)}, "
+          f"pressure {snap['pressure']}, swap {mem.human(snap['swap_used'])}"
+          f" of {mem.human(snap['swap_total'])}")
+    for c in snap["clamped"]:
+        print(f"  ! {c}")
+
+    if d["leases"]:
+        print("\nrunning")
+        for tid, ls in sorted(d["leases"].items(), key=lambda kv: kv[1].get("start", 0)):
+            print(f"  {tid}  {int(now - ls.get('start', now)):>5}s  "
+                  f"{mem.human(ls.get('peak') or ls.get('need')):>8}  "
+                  f"{ls.get('project','?'):<14} {ls.get('show','')[:60]}")
+    if d["tickets"]:
+        q = sched.order(d, now)
+        print("\nwaiting")
+        for i, tid in enumerate(q, 1):
+            tk = d["tickets"][tid]
+            age = now - tk.get("enq", now)
+            flag = "!" if age >= sched.MANDATORY_AFTER else " "
+            print(f" {flag}{i:>2}. {tid}  {int(age):>5}s  "
+                  f"{mem.human(tk.get('need')):>8}  {tk.get('project','?'):<14} "
+                  f"{tk.get('show','')[:55]}")
+        res = d.get("reserve") or {}
+        if res.get("id"):
+            print(f"  reserving memory for {res['id']}")
+        elif res.get("until", 0) > now:
+            print(f"  reservation on cooldown for {int(res['until'] - now)}s")
+    if not d["leases"] and not d["tickets"]:
+        print("\nnothing queued")
+    j = d.get("judge") or {}
+    if j.get("ts"):
+        print(f"\njudge {int(now - j['ts'])}s ago: {j.get('why') or '(no reason given)'}")
+    if d.get("learn"):
+        print(f"learned footprints for {len(d['learn'])} distinct commands")
+    return 0
+
+
+def cmd_watch(args):
+    try:
+        while True:
+            os.system("clear")
+            cmd_status(args)
+            time.sleep(2)
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_judge(args):
+    d = store.read()
+    if not d["tickets"]:
+        print("nothing waiting to judge")
+        return 0
+    order, why = judge.ask(d["tickets"])
+    if order:
+        print("order:", " > ".join(order))
+        print("why:", why)
+    else:
+        print("judge unavailable:", why)
+    return 0
+
+
+def cmd_reset(args):
+    with store.Transaction() as st:
+        if st.ok:
+            st.d.update({"tickets": {}, "leases": {}, "judge": {}, "reserve": {}})
+            if args.all:
+                st.d["learn"] = {}
+    try:
+        os.remove(store.STATE) if args.all else None
+    except OSError:
+        pass
+    store.sweep_pending(0)
+    print("state cleared" + (" including learned footprints" if args.all else ""))
+    return 0
+
+
+def cmd_mode(args):
+    from rada import setup_claude
+    if not args.which:
+        print(setup_claude.config().get("mode", "gate"))
+        return 0
+    setup_claude.set_config(mode=args.which)
+    if args.which == "gate":
+        print("gating on: commands matching ~/.rada/heavy.txt are queued automatically")
+    else:
+        print("gating off: nothing is queued unless you run `rada run -- ...` yourself")
+    return 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="rada", add_help=True,
+                                description="wait for a berth before running a heavy job")
+    p.add_argument("--version", action="version", version=f"rada {__version__}")
+    sub = p.add_subparsers(dest="cmd")
+
+    r = sub.add_parser("run", help="run a command once memory allows")
+    r.add_argument("--ticket")
+    r.add_argument("--need", type=parse_bytes)
+    r.add_argument("--note")
+    r.add_argument("--max", type=float)
+    r.add_argument("--dry-run", action="store_true")
+    r.add_argument("command", nargs=argparse.REMAINDER)
+    r.set_defaults(fn=cmd_run)
+
+    for name, fn, helptext in (("status", cmd_status, "what is running and waiting"),
+                               ("watch", cmd_watch, "status, refreshed"),
+                               ("judge", cmd_judge, "run the judge once")):
+        s = sub.add_parser(name, help=helptext)
+        s.set_defaults(fn=fn)
+
+    s = sub.add_parser("reset", help="forget queue state")
+    s.add_argument("--all", action="store_true", help="also forget learned footprints")
+    s.set_defaults(fn=cmd_reset)
+
+    s = sub.add_parser("mode", help="gate (queue heavy commands) or advise (do nothing)")
+    s.add_argument("which", nargs="?", choices=["gate", "advise"])
+    s.set_defaults(fn=cmd_mode)
+
+    for name in ("install", "uninstall", "doctor"):
+        s = sub.add_parser(name, help=f"{name} the Claude Code integration")
+        s.set_defaults(fn=lambda a, n=name: _setup(n, a))
+
+    args = p.parse_args(argv)
+    if not getattr(args, "fn", None):
+        p.print_help()
+        return 0
+    if args.cmd == "run" and args.command and args.command[0] == "--":
+        args.command = args.command[1:]
+    return args.fn(args)
+
+
+def _setup(name, args):
+    from rada import setup_claude
+    for line in getattr(setup_claude, name)():
+        print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

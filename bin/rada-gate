@@ -1,0 +1,62 @@
+#!/bin/sh
+# The PreToolUse hook. It runs before every Bash command in every Claude Code session on
+# this machine, so the first thing it does is get out of the way.
+#
+# Stage one is this script, and it is written to fork exactly once, for reading standard
+# input. Matching is done with the shell's own `case`, not with grep, and the script's
+# directory comes from parameter expansion, not from dirname. On a quiet M4 that puts the
+# whole stage at roughly a millisecond over the cost of starting any hook at all, which
+# is the cost a user pays on every command that is not heavy.
+#
+# Stage two is rada-gate.py, reached only by commands that match.
+#
+# The hook never denies anything and never waits. It rewrites the command into a call to
+# the rada wrapper, which does the waiting in an ordinary process that Claude Code
+# already knows how to time out and background. If anything at all goes wrong, this
+# script prints an empty decision and the command runs untouched: a broken hook must not
+# be able to stop a session from working.
+
+[ "$RADA_DISABLE" = "1" ] && { printf '{}\n'; exit 0; }
+
+case "$0" in
+  */*) HERE=${0%/*} ;;
+  *)   HERE=. ;;
+esac
+HOME_DIR="${RADA_HOME:-$HOME/.rada}"
+
+IN=$(cat 2>/dev/null) || { printf '{}\n'; exit 0; }
+[ -z "$IN" ] && { printf '{}\n'; exit 0; }
+
+# Never gate rada itself, or the queue would wait for itself.
+case "$IN" in
+  *"rada run"*|*rada-gate*) printf '{}\n'; exit 0 ;;
+esac
+
+# The list is kept pre-joined on one line by `rada install`, so reading it is a builtin
+# and costs no process. Editing heavy.txt without reinstalling leaves it stale, which is
+# why `rada doctor` checks the timestamps.
+PATTERNS=''
+if [ -r "$HOME_DIR/heavy.re" ]; then
+  read -r PATTERNS < "$HOME_DIR/heavy.re" 2>/dev/null
+fi
+[ -z "$PATTERNS" ] && PATTERNS='torch|transformers|tensorflow|jax|diffusers|llama|ollama|whisper|xcodebuild|cargo build|cargo test|swift build|gradle|ffmpeg|blender|docker build|docker compose|make -j|ninja|webpack|vite build|next build|npm run build|yarn build|pnpm build|pytest|unity|accelerate|deepspeed|vllm'
+
+# Substring match, one shell builtin per pattern, no subprocess.
+OLD_IFS=$IFS
+IFS='|'
+# shellcheck disable=SC2086
+set -- $PATTERNS
+IFS=$OLD_IFS
+HIT=0
+for p in "$@"; do
+  [ -z "$p" ] && continue
+  case "$IN" in *"$p"*) HIT=1; break ;; esac
+done
+[ "$HIT" = "0" ] && { printf '{}\n'; exit 0; }
+
+OUT=$(printf '%s' "$IN" | RADA_PATTERNS="$PATTERNS" python3 "$HERE/rada-gate.py" 2>/dev/null)
+case "$OUT" in
+  \{*) printf '%s\n' "$OUT" ;;
+  *)   printf '{}\n' ;;
+esac
+exit 0
