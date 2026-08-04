@@ -54,7 +54,14 @@ SCHEMA = json.dumps({
 # Only these reach the judge. Everything else in the environment is a way for the
 # machine's state to influence a process whose one job is to sort a list.
 KEEP_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR",
+            "TERM", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
             "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+
+# A denylist behind the allowlist. `--tools ""` already removes everything, and this
+# costs one argument, so it stays as cover for that flag being renamed or misparsed by
+# some future build.
+NO_TOOLS = ("Bash,Read,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep,"
+            "TodoWrite,SlashCommand,Skill")
 
 
 def _scrub(text, limit=160):
@@ -172,12 +179,15 @@ def ask(tickets, now=None):
     cwd, mcp = _harness_dir()
     env = {k: os.environ[k] for k in KEEP_ENV if k in os.environ}
     env["RADA_DISABLE"] = "1"
+    # the same gate --safe-mode sets, so an argv typo does not quietly reopen hooks
+    env["CLAUDE_CODE_SAFE_MODE"] = "1"
     try:
         p = subprocess.run(
             ["claude", "-p",
              "--model", MODEL,
              "--system-prompt-file", SYS_PROMPT,
              "--tools", "",
+             "--disallowedTools", NO_TOOLS,
              "--safe-mode",
              "--setting-sources", "",
              "--strict-mcp-config", "--mcp-config", mcp,
@@ -185,7 +195,8 @@ def ask(tickets, now=None):
              "--no-session-persistence",
              "--output-format", "json",
              "--json-schema", SCHEMA,
-             "--effort", "low"],
+             "--effort", "low",
+             "--max-budget-usd", "0.05"],
             input=prompt, capture_output=True, text=True, timeout=TIMEOUT,
             cwd=cwd, env=env)
     except subprocess.TimeoutExpired:
