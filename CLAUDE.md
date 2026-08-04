@@ -92,11 +92,19 @@ codice spiegano **perché**, non cosa.
 
 ## Cosa è aperto
 
-- **La harness del giudice.** Oggi è `claude -p --model haiku` che eredita l'intero
-  ambiente dell'utente: i suoi hook (incluso quello di rada), i suoi server MCP, i suoi
-  plugin, i suoi CLAUDE.md e il prompt di sistema completo dell'agente. Va chiusa: prompt
-  di sistema dedicato, nessun tool, nessun MCP, `--settings` minimale senza hook, nessuna
-  persistenza di sessione. I flag esistono e sono stati verificati con `claude --help`.
+- **La harness del giudice è chiusa** (04/08 sera): prompt di sistema in
+  `rada/judge.sys`, `--tools ""`, `--safe-mode`, `--setting-sources ""` (quindi nessun
+  hook, nemmeno quello di rada), `--strict-mcp-config` con lista vuota,
+  `--disable-slash-commands`, `--no-session-persistence`, `--json-schema`, cartella di
+  lavoro vuota, ambiente ridotto a una lista corta, prompt su stdin e non in argv. Il
+  contesto resta nuovo a ogni verdetto, ed è la proprietà su cui poggia tutto il resto.
+  Una sessione di giudice persistente è stata progettata e scartata: ricorderebbe di più,
+  e ricorderebbe anche un'iniezione.
+  **Quello che passa ancora**: `tools/prova-giudice.py` misura sei attacchi in confronto
+  appaiato. Uno su sei ha funzionato, l'appello alla scadenza ravvicinata, e la
+  motivazione del giudice ripeteva la frase iniettata. Compra novanta secondi. Se cambi
+  `rada/judge.sys`, rilancia quel test e aggiorna la tabella nei due README con i numeri
+  nuovi: la tabella riporta una misura, non una promessa.
 - **Il lavoro fuori da Bash non è intercettato.** Un tool MCP che compila un progetto
   Xcode dentro il proprio server è invisibile a un hook su Bash.
 - **Nessuna versione taggata.** `rada/__init__.py` ha `__version__` e `SCHEMA`; il numero
