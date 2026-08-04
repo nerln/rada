@@ -23,6 +23,8 @@ davvero, e quando ne aspettano diversi è un modello linguistico a decidere chi 
 prima, perché un modello che legge il nome del progetto e il comando sa distinguere un
 test che qualcuno sta aspettando da una reindicizzazione notturna, e l'ordine di arrivo no.
 
+![rada status](docs/status.svg)
+
 ## Come funziona
 
 ```
@@ -105,7 +107,7 @@ si era imparato. Se lo sai già, dichiaralo con `--need 6G`.
 
 Quando il job in testa non ci sta, rada prima si chiede se aspettare possa servire a
 qualcosa: una prenotazione libera solo la memoria che rada stessa ha concesso, quindi se il
-job non ci starebbe neanche dopo che tutti i job in coda hanno finito, quella memoria e' di
+job non ci starebbe neanche dopo che tutti i job in coda hanno finito, quella memoria è di
 programmi fuori dalla coda e tenere fermi gli altri non ottiene niente. In quel caso rada
 dice quali programmi la tengono e aspetta senza bloccare nessuno.
 
@@ -139,6 +141,8 @@ Bash avrebbero fermato non verrà più fermato da quelle. Se i tuoi permessi Bas
 larghi non cambia niente che noteresti. Se sono stretti e ci contavi, o lasci perdere la
 regola e approvi ogni job quando te lo chiede, oppure lanci `rada mode advise`, che
 disattiva la coda automatica e lascia rada come qualcosa che invochi a mano.
+
+![rada doctor](docs/doctor.svg)
 
 ## Uso
 

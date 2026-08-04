@@ -22,6 +22,8 @@ and a language model decides who goes first when several are waiting, because a 
 reading the project name and the command can tell a test someone is waiting for from a
 nightly re-index, and arrival order cannot.
 
+![rada status](docs/status.svg)
+
 ## How it works
 
 ```
@@ -137,6 +139,8 @@ will no longer be stopped by them. If your Bash permissions are already broad th
 nothing you would notice. If they are narrow and you rely on them, either leave the rule out
 and approve each job when asked, or run `rada mode advise`, which turns automatic queueing
 off and leaves rada as something you invoke by hand.
+
+![rada doctor](docs/doctor.svg)
 
 ## Using it
 
