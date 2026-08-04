@@ -509,6 +509,12 @@ p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "rada"),
 check("--dry-run does not run the command even when rada is disabled",
       not os.path.exists(os.path.join(TMP, "must-not-exist")), p.stdout[:150])
 
+p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "rada"),
+                    "run", "--need", "1M", "--", "true"],
+                   capture_output=True, text=True, env=dict(env, RADA_DISABLE="1"))
+check("asking for a berth while disabled says so loudly",
+      "without queueing" in p.stderr, p.stderr[-200:])
+
 p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "rada"), "status"],
                    capture_output=True, text=True, env=env)
 check("status runs", p.returncode == 0, p.stderr[:200])
