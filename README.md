@@ -146,6 +146,8 @@ off and leaves rada as something you invoke by hand.
 
 ```bash
 rada status                        # what is running, what is waiting, and why
+rada force <id>                    # start a queued job now, budget ignored
+rada force <id> --after <id>       # start it once another job has finished
 rada watch                         # the same, refreshed
 rada run --need 6G -- python train.py
 rada run --note "blocking the paper deadline" -- pytest tests/
@@ -159,6 +161,16 @@ it and run `rada install` again to recompile it.
 
 `RADA_FAKE_BUDGET=500M rada status` pins the budget to a number you choose, which is how
 to see what the queue does on a machine smaller than yours.
+
+## When the machine simply cannot
+
+A job that needs more than the machine can free is not a scheduling problem. rada says so
+rather than waiting silently: it names the programs holding the memory, sends one desktop
+notification, and prints the command that overrides it. `rada force <id>` starts a job now
+and ignores the budget, and `rada force <id> --after <other>` sequences two jobs that
+would crush the machine together. A forced job is marked as forced in `rada status`, since
+the fairness lemmas describe the decisions rada makes on its own and a human override sits
+outside them.
 
 ## What it does not do
 

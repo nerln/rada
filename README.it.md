@@ -148,6 +148,8 @@ disattiva la coda automatica e lascia rada come qualcosa che invochi a mano.
 
 ```bash
 rada status                        # cosa gira, cosa aspetta, e perché
+rada force <id>                    # fai partire ora un job in coda, budget ignorato
+rada force <id> --after <id>       # fallo partire quando un altro ha finito
 rada watch                         # lo stesso, aggiornato
 rada run --need 6G -- python train.py
 rada run --note "blocca la scadenza del paper" -- pytest tests/
@@ -161,6 +163,16 @@ Modificalo e rilancia `rada install` per ricompilarlo.
 
 `RADA_FAKE_BUDGET=500M rada status` fissa il budget a un numero che scegli tu, ed è il
 modo per vedere cosa fa la coda su una macchina più piccola della tua.
+
+## Quando la macchina proprio non ce la fa
+
+Un job che chiede più di quanto la macchina possa liberare non è un problema di
+ordinamento. rada lo dice invece di aspettare in silenzio: nomina i programmi che tengono
+la memoria, manda una notifica sulla scrivania, e stampa il comando che la scavalca.
+`rada force <id>` fa partire un job subito ignorando il budget, e
+`rada force <id> --after <altro>` mette in sequenza due job che insieme schianterebbero la
+macchina. Un job forzato è marcato come tale in `rada status`, perché i lemmi sull'equità
+descrivono le decisioni che rada prende da sola e una forzatura umana sta fuori da quelle.
 
 ## Cosa non fa
 
