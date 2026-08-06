@@ -65,6 +65,18 @@ def main():
         # Advisory mode: say nothing, change nothing. The user has not opted in.
         out()
 
+    # With one session open there is nobody to coordinate with, and queueing only adds
+    # a wait before doing what the job was always free to do. Record that this session
+    # is alive, and stand aside unless somebody else is here or work is already in
+    # flight. A failure to decide leaves the old behaviour in place: gate as before.
+    try:
+        from rada import sessions
+        sessions.note(payload.get("session_id"))
+        if not sessions.contended(payload.get("session_id")):
+            out()
+    except Exception:
+        pass
+
     try:
         store.ensure_home()
         store.sweep_pending()

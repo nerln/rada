@@ -380,6 +380,11 @@ def cmd_status(args):
           f" of {mem.human(snap['swap_total'])}")
     for c in snap["clamped"]:
         print(f"  ! {c}")
+    try:
+        from rada import sessions
+        print(f"  {sessions.describe()}")
+    except Exception:
+        pass
 
     if d["leases"]:
         print("\nrunning")

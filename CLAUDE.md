@@ -40,11 +40,24 @@ Queste sono il progetto. Tutto il resto è dettaglio.
    non passano mai da una shell; nella riga riscritta l'originale compare dentro un
    commento `#`, che contiene ogni metacarattere. La newline è l'unica cosa che potrebbe
    chiudere il commento, quindi va tolta.
+7. **Con una sessione sola il gate si tira da parte.** Decide `rada/sessions.py`, e il
+   gate lo interroga prima di riscrivere. Le condizioni per accodare sono due, in or:
+   un'altra sessione ha toccato il gate dentro `WINDOW`, oppure esiste un lease o un
+   biglietto. La seconda non è ridondante: una sessione che ha avviato un lavoro lungo e
+   poi è rimasta zitta non emette battiti, e sparirebbe dal conteggio proprio mentre
+   tiene occupata più memoria di tutte. Se il modulo solleva, il gate accoda come prima:
+   il ripiego è il comportamento vecchio, non l'assenza di coda. I test in `tools/prova.py`
+   che vogliono vedere una riscrittura devono chiamare `seed_other_session()` prima.
 
-## I tre fatti su Claude Code verificati a mano
+## I quattro fatti su Claude Code verificati a mano
 
-Nessuno dei tre sta nella documentazione. Sono stati verificati eseguendo sessioni vere
-con un hook di prova, non letti.
+Nessuno dei quattro sta nella documentazione. Sono stati verificati eseguendo sessioni
+vere con un hook di prova, non letti.
+
+0. Il payload di un hook PreToolUse contiene `session_id`, `transcript_path`, `cwd`,
+   `prompt_id`, `permission_mode`, `hook_event_name`, `tool_name`, `tool_input` e
+   `tool_use_id`. Verificato il 06/08/2026 con una sonda temporanea nel gate: senza
+   `session_id` l'invariante 6 non starebbe in piedi.
 
 1. `updatedInput` di un hook PreToolUse **viene onorato senza** dichiarare
    `permissionDecision: "allow"`.

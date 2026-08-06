@@ -49,6 +49,18 @@ test che qualcuno sta aspettando da una reindicizzazione notturna, e l'ordine di
       └─ sì ──► esegue il comando originale e misura quanto ha preso davvero
 ```
 
+## Con una sessione sola non si paga niente
+
+rada esiste perché sessioni parallele non si vedono fra loro. Con una sessione sola non c'è
+nessuno con cui coordinarsi, e la coda diventa solo un'attesa prima di fare quello che il
+job era già libero di fare. Quindi il gate si tira da parte, a meno che non valga una delle
+due condizioni: un'altra sessione ha lanciato un comando di recente, oppure c'è già un
+lavoro in coda o in esecuzione. La seconda conta più di quanto sembri, perché una sessione
+che ha avviato un lavoro lungo e poi è rimasta zitta non lancia comandi, ed è esattamente
+quando occupa più memoria di tutte.
+
+`rada status` dice in quale dei due casi ti trovi, sulla terza riga.
+
 Non c'è nessun demone. Il coordinamento è un solo file JSON sotto `~/.rada` protetto da un
 lock, e l'attesa la fa un processo normale, che Claude Code sa già mandare in timeout e
 spostare in background.

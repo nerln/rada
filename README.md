@@ -34,6 +34,9 @@ nightly re-index, and arrival order cannot.
       ├─ PreToolUse hook ────────────────► looks heavy?  ── no ──► runs untouched
       │                                        │ yes
       │                                        ▼
+      │                                   is anyone else here? ── no ──► runs untouched
+      │                                        │ yes
+      │                                        ▼
       │                                   save the command verbatim,
       │                                   rewrite the call to the wrapper
       ▼
@@ -47,6 +50,18 @@ nightly re-index, and arrival order cannot.
       ├─ no ──► waits, printing why, and who is holding the memory
       └─ yes ─► runs the original command, measures what it really used
 ```
+
+## One session pays nothing
+
+rada exists because parallel sessions cannot see each other. With a single session there
+is nobody to coordinate with, and a queue is only a wait before doing what the job was
+always free to do. So the gate stands aside unless one of two things is true: another
+session has run a command recently, or some job is queued or running right now. The
+second condition matters more than it looks, because a session that started a long job
+and then went quiet issues no commands, and that is exactly when it is holding the most
+memory.
+
+`rada status` says which case you are in on its third line.
 
 There is no daemon. Coordination is a single JSON file under `~/.rada` guarded by a lock,
 and the waiting is done by an ordinary process that Claude Code already knows how to time

@@ -23,7 +23,7 @@ TMP = tempfile.mkdtemp(prefix="rada-test-")
 os.environ["RADA_HOME"] = TMP
 os.environ["RADA_DISABLE"] = "0"
 
-from rada import mem, judge, sched, store  # noqa: E402
+from rada import mem, judge, sched, sessions, store  # noqa: E402
 import rada.setup_claude as setup_claude    # noqa: E402
 
 PASS, FAIL = [], []
@@ -44,16 +44,32 @@ def fresh():
             shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
         except OSError:
             pass
+    shutil.rmtree(sessions.BEATS, ignore_errors=True)
     store.ensure_home()
+
+
+def seed_other_session(sid="sess-somebody-else"):
+    """Make the machine look like it has a second session open.
+
+    The gate stands aside on an empty machine, so a test that wants to observe queueing
+    has to say so. Calling this is the difference between testing the scheduler and
+    testing the shortcut around it.
+    """
+    sessions.note(sid)
 
 
 # --------------------------------------------------------------- 1. the rewrite is safe
 
 section("1. a rewritten command cannot leak shell operators")
 
-def rewrite(cmd):
-    """Drive bin/rada-gate.py exactly as the hook does, return the rewritten command."""
-    payload = {"tool_name": "Bash", "tool_input": {"command": cmd}}
+def rewrite(cmd, session="sess-under-test"):
+    """Drive bin/rada-gate.py exactly as the hook does, return the rewritten command.
+
+    The gate stands aside when only one session is open, so every test that wants to see
+    a rewrite needs seed_other_session() first. Section 8 tests the other side of that.
+    """
+    payload = {"tool_name": "Bash", "tool_input": {"command": cmd},
+               "session_id": session}
     env = dict(os.environ, RADA_PATTERNS="torch|ffmpeg|pytest|HEAVYPROBE")
     p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "rada-gate.py")],
                        input=json.dumps(payload), capture_output=True, text=True, env=env)
@@ -67,6 +83,7 @@ def rewrite(cmd):
 
 setup_claude.set_config(mode="gate")
 fresh()
+seed_other_session()
 
 evil = 'python -c "import torch" && touch /tmp/rada-escaped-$$ ; echo x | tee /tmp/y > /tmp/z'
 new = rewrite(evil)
@@ -655,6 +672,60 @@ check(f"and it did not wait long ({small_wait:.0f}s)", small_wait < 18, f"{small
 bo, be = big.communicate(timeout=30)
 check("the impossible job eventually gives up and runs rather than hanging",
       "impossible-ran" in bo, bo[:100] + be[-300:])
+
+
+# ------------------------------------------- 9. one session alone does not pay the queue
+
+section("9. the queue only engages when there is company")
+
+fresh()
+setup_claude.set_config(mode="gate")
+
+# Alone on the machine: nothing to coordinate with, so the command must come back
+# exactly as it was written.
+alone = rewrite("python -c 'import torch'", session="sess-alone")
+check("a lone session is not rewritten", alone is None, repr(alone))
+
+# The same command, with somebody else about, is queued as before.
+seed_other_session("sess-the-other-one")
+withco = rewrite("python -c 'import torch'", session="sess-alone")
+check("the same command is rewritten once a second session exists", bool(withco))
+
+# A session that started something long and went quiet still counts, because its work
+# is in the shared state even though it is issuing no commands.
+fresh()
+with store.Transaction() as st:
+    if st.ok:
+        st.d["leases"]["someone"] = {"pid": os.getpid(), "need": 1 << 30}
+busy_rw = rewrite("python -c 'import torch'", session="sess-alone")
+check("a lease from a quiet session still engages the queue", bool(busy_rw))
+
+fresh()
+with store.Transaction() as st:
+    if st.ok:
+        st.d["tickets"]["someone"] = {"pid": os.getpid(), "need": 1 << 30, "enq": time.time()}
+tick_rw = rewrite("python -c 'import torch'", session="sess-alone")
+check("a waiting ticket also engages the queue", bool(tick_rw))
+
+# The heartbeat has to expire, or a session closed yesterday would gate forever.
+fresh()
+sessions.note("sess-ancient")
+old = os.path.join(sessions.BEATS, "sess-ancient")
+os.utime(old, (time.time() - sessions.WINDOW - 60,) * 2)
+stale = rewrite("python -c 'import torch'", session="sess-alone")
+check("a session that went quiet long ago stops counting", stale is None, repr(stale))
+
+# The id comes from outside, so it must never be trusted as a path.
+check("a session id cannot escape its directory",
+      sessions._safe("../../etc/passwd") == "etcpasswd",
+      repr(sessions._safe("../../etc/passwd")))
+check("a non-string session id is ignored", sessions._safe(None) is None)
+sessions.note("../../../tmp/rada-escape-test")
+check("note() writes nothing outside its own directory",
+      not os.path.exists("/tmp/rada-escape-test"))
+
+# Failing to count must never block a job: the module answers, or the gate carries on.
+check("busy() survives an unreadable state", sessions.busy({}) is False)
 
 
 # -------------------------------------------------------------------------- summary
