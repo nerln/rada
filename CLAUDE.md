@@ -71,7 +71,8 @@ vere con un hook di prova, non letti.
 ## Come è fatto
 
 ```
-bin/rada           il CLI e il wrapper che aspetta, esegue e misura
+rada/cli.py        il CLI e il wrapper che aspetta, esegue e misura
+bin/rada           lo stesso comando, lanciato dal repo senza installare
 bin/rada-gate      hook PreToolUse, sh puro, un fork solo, ~3 ms
 bin/rada-gate.py   secondo stadio, raggiunto solo dai comandi che somigliano a pesanti
 rada/mem.py        contabilità della memoria su Apple Silicon, ctypes, niente psutil
