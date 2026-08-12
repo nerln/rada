@@ -13,6 +13,7 @@ dependencies = []
 
 [project.scripts]
 rada = "rada.cli:main"
+rada-mcp = "rada.mcp:main"
 
 [build-system]
 requires = ["hatchling"]

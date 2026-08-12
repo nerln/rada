@@ -157,6 +157,71 @@ off and leaves rada as something you invoke by hand.
 
 ![rada doctor](docs/doctor.svg)
 
+## The MCP server, for work that never becomes a Bash command
+
+The hook catches heavy shell commands. It cannot catch an agent about to load a model
+inside another MCP server, or a build it is about to start some other way, and an agent
+that does not know the queue exists will never ask. A command has to be pointed at; a
+tool appears in the session's tool list on its own. That is what `bin/rada-mcp` is for.
+
+Three tools: `rada_ask` for a berth, `rada_queue` for what is running and where you are
+in the line, `rada_release` when the job is done. They are the admission half of `rada
+run` and nothing else, calling `sched.decide`, `sched.order` and `cli.Waiter` directly so
+the ticket and the decision cannot drift from the wrapper's.
+
+Two differences from `rada run`, both deliberate.
+
+**It does not run your job.** A tool that takes a command line and executes it is a
+second shell with none of the permission rules around the first one. The agent already
+has a way to run things; what it was missing was permission to start.
+
+**It does not block.** `rada_ask` answers at once with go, or with your position and the
+reason, or with a refusal when the job cannot fit even after everything else has drained.
+You ask again with the same ticket. The polling is the agent taking its turn, not a timer
+inside the server: between calls the process does nothing.
+
+`rada force` is not exposed, and that is the one worth arguing about. Forcing overrides
+the memory budget, and the fairness lemmas hold precisely because a human override sits
+outside them: the person at the keyboard knows they are about to close an editor. An
+agent that can force itself past the budget is not an override, it is an opt-out, and
+every waiting job would take it. When a job truly cannot fit, `rada_ask` says so and
+names the programs holding the memory, so the agent can tell the person, who can force
+it. `rada reset`, `mode`, `install`, `uninstall`, `doctor`, `judge` and `watch` are not
+exposed either: they are things a person does to the tool, not things a session does to
+itself.
+
+Register it by hand. `rada install` does not touch it:
+
+```bash
+claude mcp add rada --scope user -- ~/dev/rada/bin/rada-mcp
+```
+
+or the same as JSON, under `mcpServers`:
+
+```json
+{"mcpServers": {"rada": {"command": "/Users/you/dev/rada/bin/rada-mcp"}}}
+```
+
+Prefer the command to editing the file. Several tools register themselves in
+`~/.claude.json` and nothing takes a lock, so two writers landing together lose each
+other's entries.
+
+Measured on this machine. Freshly started, after `initialize`, `tools/list` and one tool
+call: 16.5 MB resident. A bare `python3` is 10.2 MB of that; `ctypes`, which `mem.py`
+needs to read the kernel's own view of memory, is 1.8 MB, and the standard library
+modules `rada/cli.py` already imports are most of the rest. Left alone for three minutes
+it uses 0.00 seconds of CPU and falls to 6.4 MB resident, because macOS reclaims the
+pages of a process that touches nothing. The fall is the evidence: a process with a timer
+or a background thread keeps its pages warm. Between calls this one is blocked reading
+stdin, with no timer and no thread.
+
+A berth it is still holding when the session ends is given back as the server stops, and
+if it is killed instead, `sched.reap` frees it the moment any other rada notices the pid
+is gone. What neither of those covers is an agent that takes a berth and simply never
+calls `rada_release`: the server never saw the job's process, so it cannot tell that the
+job finished, and that memory stays promised until the session closes. `rada_queue` shows
+the berths you are holding, which is the only place that shows up.
+
 ## Using it
 
 ```bash
@@ -192,7 +257,8 @@ outside them.
 - It does not kill anything. A job that has started runs to completion, and a dev server
   that holds memory forever holds it forever. rada will say so instead of waiting silently.
 - It does not gate work that never becomes a Bash command. An MCP tool that builds an
-  Xcode project inside its own server is invisible to a hook on Bash.
+  Xcode project inside its own server is invisible to a hook on Bash. An agent can ask for
+  a berth for that work with `rada_ask`, but nothing forces it to.
 - It does not know what a job needs before it has seen it once. The first run of anything
   is assumed to need 512 MB unless you say otherwise.
 - It does not schedule across machines, and it has only been run on macOS on Apple
@@ -249,11 +315,14 @@ time, which is fair and merely less informed.
 python3 tools/prova.py
 ```
 
-Seventy checks, a couple of seconds, no model and no real memory allocated. They cover the
+133 checks, a couple of seconds, no model and no real memory allocated. They cover the
 rewrite refusing to leak shell operators or newlines, both fairness lemmas including a
 four-hundred-round adversarial simulation, lease recovery after a crash, the lock under
 four processes hammering it, the judge's output validation, reservation and backfill and
-the cooldown, and two real processes contending for one berth.
+the cooldown, two real processes contending for one berth, and `bin/rada-mcp` driven as a
+real process: that a job which cannot fit is refused rather than queued behind itself
+forever, that re-checking a ticket does not take a second place in the line, and that a
+berth is given back when the server stops.
 
 Two of those tests exist because they found real defects during development: two jobs
 could be admitted at once because the admission decision and the lease were in different

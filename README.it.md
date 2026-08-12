@@ -156,6 +156,74 @@ disattiva la coda automatica e lascia rada come qualcosa che invochi a mano.
 
 ![rada doctor](docs/doctor.svg)
 
+## Il server MCP, per il lavoro che non diventa mai un comando Bash
+
+L'hook prende i comandi pesanti della shell. Non può prendere un agente che sta per
+caricare un modello dentro un altro server MCP, o una compilazione che sta per avviare in
+un altro modo, e un agente che non sa che la coda esiste non chiederà mai. Un comando
+bisogna indicarglielo; un tool compare da solo nell'elenco della sessione. Serve a questo
+`bin/rada-mcp`.
+
+Tre tool: `rada_ask` per chiedere un posto, `rada_queue` per vedere cosa gira e a che
+punto della fila sei, `rada_release` quando il lavoro è finito. Sono la metà di `rada run`
+che ammette e nient'altro, e chiamano `sched.decide`, `sched.order` e `cli.Waiter`
+direttamente, così il biglietto e la decisione non possono divergere da quelli del
+wrapper.
+
+Due differenze da `rada run`, tutte e due volute.
+
+**Non esegue il lavoro.** Un tool che prende una riga di comando e la esegue è una seconda
+shell senza nessuna delle regole di permesso della prima. L'agente un modo di lanciare le
+cose ce l'ha già; quello che gli mancava era il permesso di cominciare.
+
+**Non blocca.** `rada_ask` risponde subito: vai, oppure la tua posizione e il motivo,
+oppure un rifiuto quando il lavoro non ci starebbe nemmeno dopo che tutto il resto si è
+svuotato. Si richiede con lo stesso biglietto. Il polling è l'agente che fa il suo turno,
+non un timer dentro il server: fra una chiamata e l'altra il processo non fa niente.
+
+`rada force` non è esposto, ed è quello su cui vale la pena discutere. Forzare scavalca il
+budget di memoria, e i lemmi di equità tengono proprio perché l'override umano sta fuori
+da loro: la persona alla tastiera sa che sta per chiudere un editor. Un agente che può
+forzarsi da solo non è un override, è una coda con l'uscita di sicurezza, e ogni job in
+attesa la prenderebbe. Quando un lavoro davvero non ci sta, `rada_ask` lo dice e nomina i
+programmi che tengono la memoria, così l'agente lo riferisce alla persona, che può
+forzarlo. Fuori anche `rada reset`, `mode`, `install`, `uninstall`, `doctor`, `judge` e
+`watch`: sono cose che una persona fa allo strumento, non cose che una sessione fa a sé
+stessa.
+
+Si registra a mano. `rada install` non lo tocca:
+
+```bash
+claude mcp add rada --scope user -- ~/dev/rada/bin/rada-mcp
+```
+
+oppure la stessa cosa in JSON, sotto `mcpServers`:
+
+```json
+{"mcpServers": {"rada": {"command": "/Users/tuonome/dev/rada/bin/rada-mcp"}}}
+```
+
+Meglio il comando che modificare il file a mano: in `~/.claude.json` si registrano da soli
+diversi strumenti e nessuno prende un lock, quindi due scrittori insieme si perdono le
+voci a vicenda.
+
+Misurato su questa macchina. Appena avviato, dopo `initialize`, `tools/list` e una
+chiamata: 16,5 MB residenti. Di quei 16,5, un `python3` nudo ne fa 10,2; `ctypes`, che
+serve a `mem.py` per leggere la memoria dal kernel, ne fa 1,8, e il resto sono moduli
+della libreria standard che `rada/cli.py` importa già. Lasciato in pace per tre minuti
+consuma 0,00 secondi di CPU e scende a 6,4 MB residenti, perché macOS si riprende le
+pagine di un processo che non tocca niente. La discesa è la prova: un processo con un
+timer o un thread di sottofondo si tiene le pagine calde. Fra una chiamata e l'altra
+questo è bloccato sulla lettura di stdin, senza timer e senza thread.
+
+Un posto ancora occupato quando la sessione finisce viene restituito allo spegnimento del
+server, e se invece il server viene ucciso lo libera `sched.reap` appena un'altra rada si
+accorge che quel pid non c'è più. Quello che nessuna delle due copre è un agente che
+prende un posto e non chiama mai `rada_release`: il server non ha mai visto il processo
+del lavoro, quindi non può accorgersi che è finito, e quella memoria resta promessa a lui
+finché la sessione non si chiude. `rada_queue` mostra i posti che stai tenendo, ed è
+l'unico punto in cui la cosa si vede.
+
 ## Uso
 
 ```bash
@@ -191,7 +259,8 @@ descrivono le decisioni che rada prende da sola e una forzatura umana sta fuori 
 - Non uccide niente. Un job partito arriva alla fine, e un server di sviluppo che tiene
   memoria per sempre la tiene per sempre. rada lo dice, invece di aspettare in silenzio.
 - Non intercetta il lavoro che non diventa mai un comando Bash. Un tool MCP che compila un
-  progetto Xcode dentro il proprio server è invisibile a un hook su Bash.
+  progetto Xcode dentro il proprio server è invisibile a un hook su Bash. Un agente può
+  chiedere un posto per quel lavoro con `rada_ask`, ma niente lo obbliga a farlo.
 - Non sa quanto serve a un job prima di averlo visto una volta. Al primo giro si assume
   512 MB, se non glielo dici tu.
 - Non fa scheduling fra macchine diverse, ed è stato eseguito solo su macOS Apple Silicon.
@@ -251,12 +320,15 @@ equo e soltanto meno informato.
 python3 tools/prova.py
 ```
 
-Settanta controlli, un paio di secondi, nessun modello caricato e nessuna memoria vera
+133 controlli, un paio di secondi, nessun modello caricato e nessuna memoria vera
 allocata. Coprono la riscrittura che non lascia sfuggire operatori di shell né newline,
 tutti e due i lemmi sull'equità inclusa una simulazione avversariale da quattrocento
 round, il recupero dei permessi dopo un crash, il lock sotto quattro processi che lo
 martellano, la validazione dell'output del giudice, prenotazione, riempimento e attesa
-crescente, e due processi veri che si contendono un posto solo.
+crescente, due processi veri che si contendono un posto solo, e `bin/rada-mcp` lanciato
+come processo vero: che un lavoro che non ci sta venga rifiutato invece di restare in coda
+dietro sé stesso per sempre, che ricontrollare un biglietto non prenda un secondo posto in
+fila, e che un posto venga restituito quando il server si ferma.
 
 Due di quei test esistono perché hanno trovato difetti veri durante lo sviluppo: due job
 potevano essere ammessi insieme perché la decisione e il permesso stavano in transazioni

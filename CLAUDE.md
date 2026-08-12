@@ -80,7 +80,9 @@ rada/store.py      stato JSON + lock atomico
 rada/sched.py      ammissione, anzianità, insieme obbligatorio, prenotazione
 rada/judge.py      il giudice e la sua validazione
 rada/setup_claude.py  install, uninstall, doctor
-tools/prova.py     78 controlli, un paio di secondi, nessun modello caricato
+rada/mcp.py        ask, queue, release come tool MCP: ammissione senza esecuzione
+bin/rada-mcp       il server MCP, lo lancia Claude Code
+tools/prova.py     133 controlli, un paio di secondi, nessun modello caricato
 tools/schermate.py rigenera le immagini del README da output vero
 tools/prova-giudice.py  prova viva di resistenza all'iniezione, chiama il modello
 ```
@@ -121,7 +123,15 @@ codice spiegano **perché**, non cosa.
   `rada/judge.sys`, rilancia quel test e aggiorna la tabella nei due README con i numeri
   nuovi: la tabella riporta una misura, non una promessa.
 - **Il lavoro fuori da Bash non è intercettato.** Un tool MCP che compila un progetto
-  Xcode dentro il proprio server è invisibile a un hook su Bash.
+  Xcode dentro il proprio server è invisibile a un hook su Bash. Da `rada/mcp.py` un
+  agente può chiederlo lui un posto, ma resta volontario: il gate obbligatorio è ancora
+  solo quello su Bash.
+- **Un posto preso via MCP lo restituisce solo chi lo ha preso.** Il server non vede il
+  processo del lavoro, quindi non può accorgersi che è finito: se l'agente non chiama
+  `rada_release`, la memoria resta promessa a lui finché la sessione non si chiude. Le due
+  reti sotto sono lo spegnimento del server, che restituisce quello che teneva, e
+  `sched.reap`, che libera tutto quando quel pid non c'è più. Una scadenza sul posto
+  sarebbe una regola di scheduling nuova, e quelle stanno in `sched.py` o non stanno.
 - **Nessuna versione taggata.** `rada/__init__.py` ha `__version__` e `SCHEMA`; il numero
   di schema serve a far convivere due versioni durante un aggiornamento e i lettori che
   non lo riconoscono devono lasciar passare il job, non romperlo.

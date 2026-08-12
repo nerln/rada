@@ -730,6 +730,229 @@ check("busy() survives an unreadable state", sessions.busy({}) is False)
 
 # -------------------------------------------------------------------------- summary
 
+section("10. the MCP server is the same queue, reached another way")
+
+RADA_MCP = os.path.join(ROOT, "bin", "rada-mcp")
+
+
+def mcp(*calls, env=None):
+    """Speak JSON-RPC to the server and return the answers, plus the process.
+
+    A real process rather than a call into rada.mcp: half of what these tests have to
+    establish is in the transport, that stdout carries JSON-RPC and nothing else and
+    that one line is one answer.
+    """
+    lines = "".join(json.dumps(c) + "\n" for c in calls)
+    e = dict(os.environ)
+    if env:
+        e.update(env)
+    p = subprocess.run([sys.executable, RADA_MCP], input=lines,
+                       capture_output=True, text=True, env=e)
+    out = []
+    for line in p.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            out.append(None)
+    return out, p
+
+
+def rpc(i, method, **params):
+    return {"jsonrpc": "2.0", "id": i, "method": method, "params": params}
+
+
+def use(i, name, **arg):
+    return rpc(i, "tools/call", name=name, arguments=arg)
+
+
+def body(answer):
+    """The tool's text, parsed back into a dict when it is one."""
+    text = ((answer or {}).get("result", {}).get("content") or [{}])[0].get("text", "")
+    try:
+        return json.loads(text)
+    except Exception:
+        return text
+
+
+class Chat:
+    """A live conversation with the server, so a test can use what an answer gave it.
+
+    Two runs of the server cannot share a ticket: a server that stops gives back what it
+    was holding. Re-checking a ticket is therefore only observable inside one session,
+    which is also the only place it happens in real use.
+    """
+
+    def __init__(self, **env):
+        e = dict(os.environ)
+        e.update(env)
+        self.p = subprocess.Popen([sys.executable, RADA_MCP], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  text=True, env=e)
+        self.i = 0
+
+    def call(self, name, **arg):
+        self.i += 1
+        self.p.stdin.write(json.dumps(use(self.i, name, **arg)) + "\n")
+        self.p.stdin.flush()
+        try:
+            return body(json.loads(self.p.stdout.readline()))
+        except Exception:
+            return {}
+
+    def close(self):
+        self.p.stdin.close()
+        self.p.wait(timeout=20)
+
+
+fresh()
+
+answers, proc = mcp(
+    rpc(1, "initialize", protocolVersion="2025-06-18"),
+    rpc(2, "tools/list"),
+    use(3, "rada_ask", command="python train.py", need="200M", note="a test",
+        session="sess-mcp", cwd=ROOT),
+    use(4, "rada_queue", session="sess-mcp"),
+    rpc(5, "ping"),
+    env={"RADA_FAKE_BUDGET": "4G"})
+
+check("every call gets an answer", len(answers) == 5, str(len(answers)))
+check("every answer is valid JSON-RPC 2.0, with its own id and no error",
+      all(a and a.get("jsonrpc") == "2.0" and a.get("id") == i + 1 and "result" in a
+          and "error" not in a for i, a in enumerate(answers)),
+      json.dumps(answers)[:200])
+check("nothing but JSON-RPC reaches stdout", all(a is not None for a in answers))
+check("no tool answers isError",
+      all(not (a["result"].get("isError") or False) for a in answers[2:4]))
+names = [t["name"] for t in answers[1]["result"]["tools"]]
+check("the tools are ask, queue and release",
+      names == ["rada_ask", "rada_queue", "rada_release"], str(names))
+check("force is not one of them: an agent cannot override the budget for itself",
+      not any("force" in n for n in names))
+check("neither is run: this server admits jobs, it does not execute them",
+      not any(n.endswith("_run") for n in names))
+check("nor reset, which would wipe every other session's queue",
+      not any("reset" in n for n in names))
+check("the server exits zero when stdin closes", proc.returncode == 0)
+
+granted = body(answers[2])
+check("a job that fits is admitted at once, without blocking",
+      granted.get("answer") == "go" and granted.get("ticket"), str(granted)[:120])
+check("and it is told how to give the berth back",
+      "rada_release" in (granted.get("release_with") or ""))
+seen = body(answers[3])
+check("the queue view names the caller's own berth",
+      granted.get("ticket", "?") in seen.get("you", ""), str(seen.get("you"))[:120])
+check("and reports the memory the queue is working from",
+      "budget" in (seen.get("memory") or {}))
+check("asking for a berth marks the session live for everyone else",
+      os.path.exists(os.path.join(sessions.BEATS, "sess-mcp")))
+check("nothing is left holding memory once the server has stopped",
+      not store.read()["leases"] and not store.read()["tickets"],
+      json.dumps(store.read()["leases"]))
+
+# Position in the queue is the point. A queue whose position you cannot see is a box.
+fresh()
+answers, _ = mcp(
+    use(1, "rada_ask", command="python first.py", need="400M", session="sess-one"),
+    use(2, "rada_ask", command="python second.py", need="400M", session="sess-two"),
+    use(3, "rada_queue", session="sess-two"),
+    env={"RADA_FAKE_BUDGET": "500M"})
+first, second, view = body(answers[0]), body(answers[1]), body(answers[2])
+check("the first job takes the only berth that fits", first.get("answer") == "go")
+check("the second is told to wait, not refused", second.get("answer") == "wait",
+      str(second)[:140])
+check("and it is given its position in the line",
+      second.get("position") == 1 and second.get("of") == 1, str(second)[:140])
+check("with the reason, in words, not a boolean",
+      "400.0MB" in (second.get("why") or ""), str(second.get("why")))
+check("and the way to check again without taking a second place",
+      second.get("ticket", "?") in (second.get("check_again") or ""))
+check("the queue view shows the waiting job with its position",
+      view["waiting"] and view["waiting"][0]["position"] == 1
+      and view["waiting"][0]["yours"] is True, json.dumps(view.get("waiting"))[:200])
+
+# Re-checking a ticket must not enqueue a second one, or an agent that waits politely
+# would fill the queue with copies of itself and outrank everybody by weight of numbers.
+fresh()
+chat = Chat(RADA_FAKE_BUDGET="1G")
+chat.call("rada_ask", command="python big.py", need="900M", session="sess-a")
+one = chat.call("rada_ask", command="python other.py", need="900M", session="sess-b")
+tid = one.get("ticket")
+again = chat.call("rada_ask", command="python other.py", need="900M", session="sess-b",
+                  ticket=tid)
+check("re-checking answers about the ticket you already hold",
+      again.get("ticket") == tid, f"{tid} -> {again.get('ticket')}")
+check("and does not take a second place in the queue",
+      len(store.read()["tickets"]) == 1, json.dumps(list(store.read()["tickets"])))
+gone = chat.call("rada_release", ticket=tid)
+check("giving up releases the place", "released" in str(gone))
+check("and the queue is empty again", store.read()["tickets"] == {})
+chat.close()
+
+# A job the machine cannot fit even when everything else has drained is refused, and
+# its ticket is dropped. Waiting forever at the head of the queue is not patience: it
+# reserves memory that is never coming and blocks everyone behind it.
+fresh()
+answers, _ = mcp(
+    use(1, "rada_ask", command="python enormous.py", need="900G", session="sess-huge"),
+    use(2, "rada_queue", session="sess-huge"),
+    env={"RADA_FAKE_BUDGET": "500M"})
+refusal, after = body(answers[0]), body(answers[1])
+check("a job that cannot ever fit is refused, not queued",
+      refusal.get("answer") == "refused", str(refusal)[:140])
+check("the refusal says how much could be freed and how much it wanted",
+      "900.0GB" in (refusal.get("why") or ""), str(refusal.get("why"))[:140])
+check("it names the programs holding the memory instead of blaming the queue",
+      isinstance(refusal.get("held_by"), list) and refusal["held_by"])
+check("it sends the decision to the person, who is the one who can force it",
+      "force" in (refusal.get("what_to_do") or ""))
+check("and nothing is left waiting behind it",
+      after["waiting"] == [] and after["running"] == [],
+      json.dumps(after["waiting"])[:120])
+
+# The session id comes from the caller and is never trusted with anything. rada grants
+# memory by comparing bytes, not by reading names, so a declared id buys nothing; it
+# must still never be allowed to build a path.
+fresh()
+answers, _ = mcp(
+    use(1, "rada_ask", command="python x.py", need="10M", session="../../etc/passwd",
+        cwd=ROOT),
+    env={"RADA_FAKE_BUDGET": "4G"})
+check("a made-up session id is accepted as a label and nothing more",
+      body(answers[0]).get("answer") == "go")
+check("and it cannot escape the heartbeat directory",
+      sorted(os.listdir(sessions.BEATS)) == ["etcpasswd"],
+      str(sorted(os.listdir(sessions.BEATS))))
+
+# Releasing gives the berth back and teaches rada nothing, because this server never
+# watched the process and a made-up peak would poison the estimate for everyone.
+fresh()
+answers, _ = mcp(
+    use(1, "rada_ask", command="python measured.py", need="100M", session="sess-r"),
+    use(2, "rada_release", ticket="unknown-ticket"),
+    env={"RADA_FAKE_BUDGET": "4G"})
+check("releasing something nobody holds says so instead of failing",
+      "nothing to release" in body(answers[1]), str(body(answers[1]))[:100])
+check("a released berth teaches no footprint, since none was measured",
+      store.read()["learn"] == {}, json.dumps(store.read()["learn"])[:120])
+
+# A caller mistake is a caller mistake, and rada answers the next call anyway.
+answers, _ = mcp(
+    use(1, "rada_ask", need="6G", session="sess-x"),
+    use(2, "rada_ask", command="python y.py", need="not a size", session="sess-x"),
+    use(3, "rada_queue", session="sess-x"),
+    env={"RADA_FAKE_BUDGET": "4G"})
+check("asking for a berth without saying for what is refused as a caller error",
+      answers[0]["result"]["isError"] is True, str(body(answers[0]))[:100])
+check("a size that is not a size is reported, not guessed at",
+      answers[1]["result"]["isError"] is True and "6G" in body(answers[1]),
+      str(body(answers[1]))[:100])
+check("and the server is still answering afterwards",
+      answers[2]["result"]["isError"] is False)
+
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     for f in FAIL:
