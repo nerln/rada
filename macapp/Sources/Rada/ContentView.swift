@@ -154,12 +154,16 @@ struct ContentView: View {
                     Section {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Nothing is queued.").font(.callout)
+                            // Wrapping, not truncating: this is the one row in the
+                            // sidebar that is a sentence rather than a command, and a
+                            // sidebar is narrow enough to eat half of it.
                             Text(harbour.sessions.hasPrefix("one session on its own")
                                  ? "With one session open rada stands aside, and heavy "
                                  + "commands run the moment they are typed."
                                  : "Heavy commands from any session will appear here.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                         .padding(.vertical, 4)
                     }
