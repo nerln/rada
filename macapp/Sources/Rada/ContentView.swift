@@ -163,7 +163,9 @@ struct ContentView: View {
                                  : "Heavy commands from any session will appear here.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .lineLimit(nil)
                                 .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .padding(.vertical, 4)
                     }
