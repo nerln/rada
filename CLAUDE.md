@@ -40,7 +40,18 @@ Queste sono il progetto. Tutto il resto è dettaglio.
    non passano mai da una shell; nella riga riscritta l'originale compare dentro un
    commento `#`, che contiene ogni metacarattere. La newline è l'unica cosa che potrebbe
    chiudere il commento, quindi va tolta.
-7. **Con una sessione sola il gate si tira da parte.** Decide `rada/sessions.py`, e il
+7. **La finestra non decide niente.** `macapp/` legge `rada status --json` e disegna la
+   risposta, e ogni bottone è un comando che si sarebbe potuto scrivere a mano. Dentro non
+   ci va nessuna copia della regola di ammissione: due scheduler non sarebbero d'accordo
+   proprio il giorno in cui conta. Le frasi sul perché un job aspetta arrivano da
+   `sched.py` come stringhe e non vengono riscritte in Swift.
+8. **Le viste leggono da una copia ripulita.** Leggere la coda non prende il lock, quindi
+   rada non si accorge che un processo è morto finché qualcun altro non scrive. Senza la
+   pulizia in lettura, su una macchina tranquilla restavano a schermo job finiti un'ora
+   prima con la loro memoria ancora contata contro il budget. `cli.swept()` fa la pulizia
+   su una copia, le due viste prendono i numeri da lì, e quello che la pulizia toglierebbe
+   viene riportato a parte come `left_behind`. A scrivere davvero è solo `rada reap`.
+9. **Con una sessione sola il gate si tira da parte.** Decide `rada/sessions.py`, e il
    gate lo interroga prima di riscrivere. Le condizioni per accodare sono due, in or:
    un'altra sessione ha toccato il gate dentro `WINDOW`, oppure esiste un lease o un
    biglietto. La seconda non è ridondante: una sessione che ha avviato un lavoro lungo e
@@ -80,10 +91,12 @@ rada/store.py      stato JSON + lock atomico
 rada/sched.py      ammissione, anzianità, insieme obbligatorio, prenotazione
 rada/judge.py      il giudice e la sua validazione
 rada/setup_claude.py  install, uninstall, doctor
+macapp/            la finestra: SwiftUI, macOS 14+, nessuna dipendenza, niente .xcodeproj
 rada/mcp.py        ask, queue, release come tool MCP: ammissione senza esecuzione
 bin/rada-mcp       il server MCP, lo lancia Claude Code
-tools/prova.py     133 controlli, un paio di secondi, nessun modello caricato
-tools/schermate.py rigenera le immagini del README da output vero
+tools/prova.py     158 controlli, un paio di secondi, nessun modello caricato
+tools/schermate.py rigenera le immagini a terminale del README da output vero
+tools/schermate-app.sh  fotografa la finestra sulla stessa coda inventata
 tools/prova-giudice.py  prova viva di resistenza all'iniezione, chiama il modello
 ```
 
@@ -91,9 +104,18 @@ tools/prova-giudice.py  prova viva di resistenza all'iniezione, chiama il modell
 
 ```bash
 python3 tools/prova.py          # deve dire 0 failed
+swift test --package-path macapp   # se hai toccato la finestra
 python3 tools/schermate.py      # se hai cambiato l'output di status o doctor
-python3 ~/dev/scriba/tools/stylecheck.py README.md README.it.md
+./tools/schermate-app.sh        # se hai cambiato il layout della finestra
+python3 ~/dev/scriba/tools/stylecheck.py README.md README.it.md docs/index.html
 ```
+
+Le schermate si rifanno solo da questi due script: la coda che si vede nelle immagini è
+inventata e sta in `tools/schermate.py`, e la macchina su cui gira è dichiarata lì dentro
+(`MACHINE`, `BUDGET`) invece di essere quella vera, altrimenti il budget della prima riga
+e la pressione della seconda raccontano due macchine diverse. Le foto della finestra
+passano da `open`, non dall'eseguibile dentro il bundle: lanciato per path, dopo qualche
+giro, si è ritrovato senza finestra e da uccidere.
 
 Lo stylecheck è vincolante sui README: niente trattini lunghi, niente termini della lista
 vietata, niente contrapposizioni "X, non Y" usate come slogan. Segnala anche `--` dentro
@@ -132,6 +154,9 @@ codice spiegano **perché**, non cosa.
   reti sotto sono lo spegnimento del server, che restituisce quello che teneva, e
   `sched.reap`, che libera tutto quando quel pid non c'è più. Una scadenza sul posto
   sarebbe una regola di scheduling nuova, e quelle stanno in `sched.py` o non stanno.
+- **Il sito sta in `docs/`** e lo serve GitHub Pages da `master`. `docs/brand.md` tiene
+  il marchio e i colori; `docs/img/mark.svg` e `macapp/Tools/make-icon.swift` sono lo
+  stesso disegno in due linguaggi e vanno cambiati insieme.
 - **Nessuna versione taggata.** `rada/__init__.py` ha `__version__` e `SCHEMA`; il numero
   di schema serve a far convivere due versioni durante un aggiornamento e i lettori che
   non lo riconoscono devono lasciar passare il job, non romperlo.

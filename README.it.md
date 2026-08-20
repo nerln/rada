@@ -3,7 +3,7 @@
 Una rada per i job pesanti, così che più sessioni di Claude Code sullo stesso portatile
 smettano di lanciarli tutte insieme.
 
-[English](README.md)
+[English](README.md) · [nerln.github.io/rada](https://nerln.github.io/rada/)
 
 ## Perché esiste
 
@@ -48,6 +48,87 @@ test che qualcuno sta aspettando da una reindicizzazione notturna, e l'ordine di
       ├─ no ──► aspetta, dicendo perché e chi tiene la memoria
       └─ sì ──► esegue il comando originale e misura quanto ha preso davvero
 ```
+
+## La finestra
+
+`rada status` risponde a tutto quello che una coda solleva, in un terminale che qualcuno
+deve andare a guardare. L'applicazione in `macapp/` mostra la stessa coda, e aggiunge le
+due decisioni che rada non prende da sola.
+
+![la coda, raggruppata per quello che sta per succedere a ogni job](docs/img/01-queue.png)
+
+I job sono raggruppati per quello che succede dopo e non per ordine di arrivo: cosa gira,
+cosa parte appena lo chiede, cosa aspetta, e cosa una persona ha trattenuto. La riga in
+alto è il budget, quanto è già promesso ai job in corso, e quanto ne resta.
+
+Quel raggruppamento è una proiezione, non una stima. Chiedendo allo scheduler un job alla
+volta ne risultano tre in partenza quando ne partirà uno solo, perché a ciascuno viene
+detta la stessa memoria libera. La finestra chiede `sched.plan`, che percorre la coda su
+una copia e consegna la memoria a ogni job ammesso prima di chiedere del successivo.
+
+![un job in attesa, con il motivo per cui aspetta](docs/img/02-waiting.png)
+
+Ogni job porta con sé la frase che ha scritto `rada/sched.py`, parola per parola, così che
+leggerla qui e leggerla in un terminale un'ora dopo non possa dare due risposte diverse.
+Sotto: il posto in coda, se il job è abbastanza vecchio che ormai decide solo l'anzianità,
+la memoria che vuole e se quel numero è stato imparato o dichiarato, quale sessione lo ha
+messo in coda e a che ora, e cosa ha detto il giudice se aveva un'opinione.
+
+### Far partire un job oltre il budget
+
+![il pannello per forzare un job, con le sue tre forme](docs/img/04-force.png)
+
+Come `rada force`, con le sue tre forme davanti: adesso, fra qualche minuto perché stai
+per chiudere qualcosa che tiene la memoria, oppure quando un job già in corso ha finito.
+
+### Trattenere un job
+
+![un job trattenuto, che mantiene il suo posto in coda](docs/img/03-held.png)
+
+L'estremo opposto, ed è nuovo: `rada hold <id>` tiene un job fuori dai giochi senza
+toglierlo dalla coda. Esiste perché rada decide per memoria e per anzianità, e nessuna
+delle due sa che il run che hai davanti è quello con la config sbagliata dentro, o che fra
+dieci minuti la macchina serve per una call.
+
+Un job trattenuto mantiene il posto e continua a invecchiare, quindi
+`rada hold <id> --release` lo riporta dove lo mette il suo orario di arrivo e non in
+fondo. Finché è trattenuto non prende nessuna prenotazione di memoria e nessuno si
+accoda dietro di lui, perché un job che non partirà non deve tenere aperta la macchina per
+sé. Forzare un job trattenuto toglie il trattenimento e lo dice; trattenere un job forzato
+annulla la forzatura e lo dice.
+
+### I job lasciati indietro da una sessione
+
+![un job la cui sessione se n'è andata, e cosa tiene ancora](docs/img/05-left-behind.png)
+
+Un posto viene scritto quando un job parte e restituito quando finisce. Una sessione
+chiusa a metà lavoro non lo restituisce mai, e rada si accorge che un processo non c'è più
+solo quando qualcosa prende il lock, cosa che leggere la coda non fa. Su una macchina
+tranquilla questo lascia sullo schermo un job finito un'ora fa, con la memoria che gli era
+stata promessa ancora contata contro il budget, e niente che dica quali job siano veri.
+
+Adesso tutte e due le viste prendono i numeri da una copia ripulita e riportano a parte
+quello che la pulizia toglierebbe, con quanto sta costando. `rada reap` li lascia andare.
+Niente che stia girando viene toccato e niente viene ucciso.
+
+### Come si compila
+
+```bash
+cd macapp
+./build.sh
+open Rada.app
+```
+
+Swift 6 e macOS 14 o successivo, nessuna dipendenza, nessun file di progetto. La finestra
+lancia `rada status --json` ogni due secondi e disegna la risposta, e ogni bottone è un
+comando che si sarebbe potuto scrivere a mano. Dentro non c'è una seconda copia della
+regola di ammissione, ed è il punto: due scheduler non sarebbero d'accordo proprio il
+giorno in cui conta.
+
+Le immagini qui sopra sono la finestra vera. `tools/schermate-app.sh` scrive la coda
+inventata di `tools/schermate.py` in una cartella di stato usa e getta, ci apre sopra la
+finestra e le chiede di fotografarsi, così una modifica al layout sta a un comando di
+distanza dall'essere nel README.
 
 ## Con una sessione sola non si paga niente
 
@@ -228,8 +309,12 @@ l'unico punto in cui la cosa si vede.
 
 ```bash
 rada status                        # cosa gira, cosa aspetta, e perché
+rada status --json                 # la stessa immagine come dati, ed è quello che legge l'app
 rada force <id>                    # fai partire ora un job in coda, budget ignorato
 rada force <id> --after <id>       # fallo partire quando un altro ha finito
+rada hold <id> --note "non ora"    # tienilo fermo finché non dici tu
+rada hold <id> --release           # rimettilo in coda, con l'anzianità che aveva
+rada reap                          # lascia andare i job il cui processo non c'è più
 rada watch                         # lo stesso, aggiornato
 rada run --need 6G -- python train.py
 rada run --note "blocca la scadenza del paper" -- pytest tests/
@@ -253,6 +338,10 @@ la memoria, manda una notifica sulla scrivania, e stampa il comando che la scava
 `rada force <id> --after <altro>` mette in sequenza due job che insieme schianterebbero la
 macchina. Un job forzato è marcato come tale in `rada status`, perché i lemmi sull'equità
 descrivono le decisioni che rada prende da sola e una forzatura umana sta fuori da quelle.
+
+Vale anche al contrario. `rada hold <id>` impedisce del tutto a un job di partire, e non
+c'è quantità di memoria libera che lo revochi. Tutte e due le scavalcature si vedono
+ovunque si veda la coda, ed è quello che rada deve a una persona in cambio dell'obbedirle.
 
 ## Cosa non fa
 
@@ -317,10 +406,11 @@ equo e soltanto meno informato.
 ## Test
 
 ```bash
-python3 tools/prova.py
+python3 tools/prova.py                 # la coda
+swift test --package-path macapp       # la finestra
 ```
 
-133 controlli, un paio di secondi, nessun modello caricato e nessuna memoria vera
+158 controlli, un paio di secondi, nessun modello caricato e nessuna memoria vera
 allocata. Coprono la riscrittura che non lascia sfuggire operatori di shell né newline,
 tutti e due i lemmi sull'equità inclusa una simulazione avversariale da quattrocento
 round, il recupero dei permessi dopo un crash, il lock sotto quattro processi che lo
@@ -329,6 +419,19 @@ crescente, due processi veri che si contendono un posto solo, e `bin/rada-mcp` l
 come processo vero: che un lavoro che non ci sta venga rifiutato invece di restare in coda
 dietro sé stesso per sempre, che ricontrollare un biglietto non prenda un secondo posto in
 fila, e che un posto venga restituito quando il server si ferma.
+
+Coprono anche il trattenimento: che un job trattenuto non parta nemmeno con tutto il
+budget libero, che si faccia da parte invece di stare in testa alla coda, che non prenda
+prenotazioni e non faccia accodare nessuno dietro di sé, che rilasciarlo gli restituisca
+il posto che la sua anzianità merita, e che al giudice non vengano sottoposti job che
+nessuno intende far partire.
+
+I nove test Swift leggono un `rada status --json` registrato e controllano il
+raggruppamento con cui è costruita la barra laterale, che un job trattenuto non finisca
+mai fra quelli in partenza, che quello che una sessione sparita ha lasciato indietro resti
+separato dalla coda viva, e che le dimensioni siano scritte esattamente come le scrive
+`rada/mem.py`, perché chi confronta la finestra con un terminale sta confrontando due
+numeri per una cosa sola.
 
 Due di quei test esistono perché hanno trovato difetti veri durante lo sviluppo: due job
 potevano essere ammessi insieme perché la decisione e il permesso stavano in transazioni

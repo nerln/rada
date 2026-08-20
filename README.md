@@ -3,7 +3,7 @@
 An anchorage for heavy jobs, so that several Claude Code sessions on one laptop stop
 starting them all at once.
 
-[Italiano](README.it.md)
+[Italiano](README.it.md) · [nerln.github.io/rada](https://nerln.github.io/rada/)
 
 ## Why this exists
 
@@ -50,6 +50,86 @@ nightly re-index, and arrival order cannot.
       ├─ no ──► waits, printing why, and who is holding the memory
       └─ yes ─► runs the original command, measures what it really used
 ```
+
+## The window
+
+`rada status` answers everything a queue raises, in a terminal somebody has to go and look
+at. The application in `macapp/` shows the same queue, and adds the two decisions rada
+will not take on its own.
+
+![the queue, grouped by what is about to happen to each job](docs/img/01-queue.png)
+
+Jobs are grouped by what happens next rather than by arrival: what is running, what starts
+as soon as it asks, what is waiting, and what a person has held. The line across the top is
+the budget, what is already promised to running jobs, and what is left of it.
+
+That grouping is a projection, not a guess. Asking the scheduler about each job in turn
+reports three jobs as starting when only one of them will, because each of them is told
+about the same free memory. The window asks `sched.plan`, which walks the queue on a copy
+and hands each admitted job its memory before asking about the next one.
+
+![a waiting job, with the reason it is waiting](docs/img/02-waiting.png)
+
+Every job carries the sentence `rada/sched.py` wrote for it, word for word, so that
+reading it here and reading it in a terminal an hour later cannot differ. Under it: the
+place in the queue, whether the job is old enough that age alone now decides, the memory
+it wants and whether that number was learned or declared, which session queued it and at
+what time, and what the judge said if it had an opinion.
+
+### Starting a job past the budget
+
+![the panel for forcing a job, with its three shapes](docs/img/04-force.png)
+
+The same as `rada force`, with its three shapes in front of you: now, in a few minutes
+because something holding the memory is about to be closed, or once a job that is already
+running has finished.
+
+### Holding a job
+
+![a held job, keeping its place in the queue](docs/img/03-held.png)
+
+The opposite end, and new here: `rada hold <id>` keeps a job out of the running without
+taking it out of the queue. It exists because rada decides by memory and by age, and
+neither of those knows that the run in front of you is the one with the wrong config in
+it, or that the machine is about to be needed for a call.
+
+A held job keeps its place and keeps ageing, so `rada hold <id> --release` returns it to
+the position its arrival time earns rather than to the back. While held it takes no
+memory reservation and nothing queues behind it, because a job that is not going to start
+must not hold the machine open for itself. Forcing a held job lifts the hold and says so;
+holding a forced job cancels the force and says so.
+
+### Jobs a session left behind
+
+![a job whose session went away, and what it is still holding](docs/img/05-left-behind.png)
+
+A berth is written down when a job starts and given back when it ends. A session closed
+mid-job never gives it back, and rada notices that a process has gone only when something
+takes the lock, which reading the queue does not do. On a quiet machine that leaves a job
+which finished an hour ago on the screen, with the memory it was promised still counted
+against the budget, and nothing saying which of the jobs are real.
+
+Both views now take their numbers from a swept copy and report what the sweep would drop
+on its own, with what it is costing. `rada reap` lets go of them. Nothing running is
+touched and nothing is killed.
+
+### Building it
+
+```bash
+cd macapp
+./build.sh
+open Rada.app
+```
+
+Swift 6 and macOS 14 or later, no dependencies, no project file. The window runs
+`rada status --json` every two seconds and draws the answer, and every button is a command
+that could have been typed instead. There is no second copy of the admission rule in it,
+which is the point: two schedulers would disagree on the day it mattered.
+
+The pictures above are the real window. `tools/schermate-app.sh` writes the invented queue
+from `tools/schermate.py` into a throwaway state directory, opens the window against it
+and asks it to photograph itself, so a change to the layout is one command away from being
+in the README.
 
 ## One session pays nothing
 
@@ -226,8 +306,12 @@ the berths you are holding, which is the only place that shows up.
 
 ```bash
 rada status                        # what is running, what is waiting, and why
+rada status --json                 # the same picture as data, which is what the app reads
 rada force <id>                    # start a queued job now, budget ignored
 rada force <id> --after <id>       # start it once another job has finished
+rada hold <id> --note "not yet"    # keep it from starting until you say otherwise
+rada hold <id> --release           # let it back in, with the age it had
+rada reap                          # let go of jobs whose process is gone
 rada watch                         # the same, refreshed
 rada run --need 6G -- python train.py
 rada run --note "blocking the paper deadline" -- pytest tests/
@@ -251,6 +335,10 @@ and ignores the budget, and `rada force <id> --after <other>` sequences two jobs
 would crush the machine together. A forced job is marked as forced in `rada status`, since
 the fairness lemmas describe the decisions rada makes on its own and a human override sits
 outside them.
+
+The same holds the other way. `rada hold <id>` keeps a job from starting at all, and no
+amount of free memory revokes it. Both overrides are visible wherever the queue is, which
+is what rada owes a person in exchange for obeying them.
 
 ## What it does not do
 
@@ -312,10 +400,11 @@ time, which is fair and merely less informed.
 ## Tests
 
 ```bash
-python3 tools/prova.py
+python3 tools/prova.py                 # the queue
+swift test --package-path macapp       # the window
 ```
 
-133 checks, a couple of seconds, no model and no real memory allocated. They cover the
+158 checks, a couple of seconds, no model and no real memory allocated. They cover the
 rewrite refusing to leak shell operators or newlines, both fairness lemmas including a
 four-hundred-round adversarial simulation, lease recovery after a crash, the lock under
 four processes hammering it, the judge's output validation, reservation and backfill and
@@ -323,6 +412,17 @@ the cooldown, two real processes contending for one berth, and `bin/rada-mcp` dr
 real process: that a job which cannot fit is refused rather than queued behind itself
 forever, that re-checking a ticket does not take a second place in the line, and that a
 berth is given back when the server stops.
+
+They also cover holding: that a held job does not start with the whole budget free, that
+it stands aside instead of leading the queue, that it takes no reservation and nothing
+queues behind it, that releasing gives back the place its age earns, and that the judge is
+not asked about jobs nobody intends to run.
+
+The nine Swift tests read a recorded `rada status --json` and check the grouping the
+sidebar is built from, that a held job never appears among the ones about to start, that
+what a vanished session left behind is kept apart from the live queue, and that sizes are
+written exactly as `rada/mem.py` writes them, since a person comparing the window with a
+terminal is comparing two numbers for one thing.
 
 Two of those tests exist because they found real defects during development: two jobs
 could be admitted at once because the admission decision and the lease were in different
