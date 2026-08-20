@@ -8,11 +8,18 @@ after changing any output and the pictures follow.
     python3 tools/schermate.py
 
 Writes docs/status.svg and docs/doctor.svg.
+
+    python3 tools/schermate.py --home /tmp/rada-demo
+
+writes the same demo queue into a state directory, prints the environment that goes with
+it, and stops. That is how the window in macapp/ is photographed by tools/schermate-app.sh:
+one description of the demo, and two programs drawing it.
 """
 import html
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -26,25 +33,45 @@ CH_W, LINE_H, PAD, TOP = 8.05, 19.0, 22, 44
 
 # A queue that shows every state worth showing: something running, something mandatory
 # that has waited, a reservation, and a judge verdict with its reason.
+# pid 1 rather than this process: the state written here is read again minutes later by
+# the window, and sched.reap drops a ticket whose owner has gone. launchd is always
+# there, and nothing in a picture is ever asked to run.
+DEMO_PID = 1
+# Above the kernel's maximum, so it is not a process and never will be.
+DEAD_PID = 99999
+
 NOW = 1785900000.0
 DEMO = {
     "v": 1,
     "leases": {
-        "a41f9c02": {"need": 2 * 1024**3, "peak": 1932735283, "pid": os.getpid(),
+        "a41f9c02": {"need": 2 * 1024**3, "peak": 1932735283, "pid": DEMO_PID,
                      "pgid": None, "start": NOW - 214, "sig": "s1",
                      "project": "aidirector", "show": "ffmpeg -i lecture.mov -vf scale=1280:-2 out.mp4"},
+        # A berth nobody gave back. The session that took it closed while the job was
+        # running, so the process is gone and the file still says two gigabytes are
+        # spoken for. It is in the demo because it is the state that is hardest to
+        # recognise on a real machine, and the one that makes the queue look busy when
+        # it is not.
+        "0c77b41e": {"need": 2 * 1024**3, "peak": 0, "pid": DEAD_PID, "pgid": None,
+                     "start": NOW - 5400, "seen": NOW - 3120, "sig": "s6",
+                     "project": "kart-highlights",
+                     "show": "ffmpeg -i race.mov -c:v h264_videotoolbox cut.mp4"},
     },
     "tickets": {
-        "7dc146f1": {"enq": NOW - 1840, "need": 6 * 1024**3, "pid": os.getpid(),
+        "7dc146f1": {"sid": "9c41f8e2", "enq": NOW - 1840, "need": 6 * 1024**3, "pid": DEMO_PID,
                      "sig": "s2", "project": "mechint", "cwd": "/Users/x/mechint",
                      "show": "python3 exp22_jspace_null.py",
                      "intent": "the null control a paper is blocked on"},
-        "3b90ae55": {"enq": NOW - 260, "need": 4 * 1024**3, "pid": os.getpid(),
+        "3b90ae55": {"sid": "2ad07b56", "enq": NOW - 260, "need": 4 * 1024**3, "pid": DEMO_PID,
                      "sig": "s3", "project": "OliveraXR3", "cwd": "/Users/x/OliveraXR3",
                      "show": "xcodebuild -scheme Olivera -destination 'generic/platform=iOS'"},
-        "91c23663": {"enq": NOW - 41, "need": 512 * 1024**2, "pid": os.getpid(),
+        "91c23663": {"sid": "9c41f8e2", "enq": NOW - 41, "need": 512 * 1024**2, "pid": DEMO_PID,
                      "sig": "s4", "project": "molo", "cwd": "/Users/x/molo",
                      "show": "pytest tests/ -q"},
+        "c5e0d418": {"sid": "e73b1904", "enq": NOW - 620, "need": 3 * 1024**3, "pid": DEMO_PID,
+                     "sig": "s5", "project": "vesuvius", "cwd": "/Users/x/vesuvius",
+                     "show": "python3 reindex.py --all --workers 8",
+                     "hold": {"since": NOW - 300, "note": "not while the disk is full"}},
     },
     "judge": {"ts": NOW - 22, "order": ["7dc146f1", "91c23663", "3b90ae55"],
               "why": "the experiment has waited half an hour and blocks a paper; "
@@ -54,6 +81,21 @@ DEMO = {
               "s4": {"n": 9, "p95": 402653184, "max": 447741952, "dur_p95": 31.0}},
     "reserve": {"id": "7dc146f1", "since": NOW - 120, "fails": 0},
 }
+
+
+# The machine the demo runs on is stated rather than measured. Whoever regenerates these
+# pictures is usually doing it on the machine that needed rada in the first place, and a
+# budget of nine gigabytes over a line saying the kernel is at pressure two describes no
+# machine at all. Nine gigabytes against 4.2 in use on a sixteen gigabyte laptop is what
+# the arithmetic in mem.py gives, so the two lines agree with each other.
+MACHINE = {"used": int(4.2 * 1024 ** 3), "pressure": 1, "jetsam": 78,
+           "swap_used": int(0.4 * 1024 ** 3), "swap_total": 6 * 1024 ** 3, "clamped": []}
+BUDGET = "9G"
+
+
+def demo_env(home):
+    return {"RADA_HOME": home, "RADA_FAKE_BUDGET": BUDGET,
+            "RADA_FAKE_MEMORY": json.dumps(MACHINE)}
 
 
 def capture(args, home, env_extra=None):
@@ -99,27 +141,41 @@ def svg(lines, title):
     return "\n".join(out)
 
 
-def main():
-    os.makedirs(DOCS, exist_ok=True)
-    home = tempfile.mkdtemp(prefix="rada-shot-")
-    os.makedirs(os.path.join(home, "pending"), exist_ok=True)
+def write_home(home):
+    """Put the demo queue in a state directory and return it.
 
-    # The demo queue is written with timestamps relative to now, so the ages in the
-    # picture are the ages the story describes rather than whatever today is.
+    The timestamps are written relative to now, so the ages in the picture are the ages
+    the story describes rather than whatever today is.
+    """
+    os.makedirs(os.path.join(home, "pending"), exist_ok=True)
     shift = time.time() - NOW
     d = json.loads(json.dumps(DEMO))
     for t in d["tickets"].values():
         t["enq"] += shift
+        if t.get("hold"):
+            t["hold"]["since"] += shift
     for l in d["leases"].values():
         l["start"] += shift
+        if l.get("seen"):
+            l["seen"] += shift
     d["judge"]["ts"] += shift
     d["reserve"]["since"] += shift
     with open(os.path.join(home, "state.json"), "w") as f:
         json.dump(d, f)
+    return home
 
-    status = capture(["status"], home, {"RADA_FAKE_BUDGET": "3G"})
-    # the budget line mentions the pin; the picture should show an ordinary machine
-    status = re.sub(r"^\s*! budget pinned.*\n?", "", status, flags=re.M)
+
+def main():
+    if "--home" in sys.argv:
+        home = write_home(os.path.expanduser(sys.argv[sys.argv.index("--home") + 1]))
+        for k, v in demo_env(home).items():
+            print(f"export {k}={shlex.quote(v)}")
+        return
+
+    os.makedirs(DOCS, exist_ok=True)
+    home = write_home(tempfile.mkdtemp(prefix="rada-shot-"))
+
+    status = capture(["status"], home, demo_env(home))
     with open(os.path.join(DOCS, "status.svg"), "w") as f:
         f.write(svg(status.split("\n"), "rada status"))
 

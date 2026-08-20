@@ -113,11 +113,11 @@ def contended(sid, d=None, window=None, now=None):
 
 
 def describe(sid=None, now=None):
-    """Riga per `rada status`. Solo lettura, non tocca niente."""
+    """Riga per `rada status`, in inglese come il resto dell'output. Solo lettura."""
     now = now or time.time()
     live = others(sid, now=now) + (1 if _safe(sid) else 0)
     if live >= 2:
-        return f"{live} sessioni aperte: la coda è attiva"
+        return f"{live} sessions open, so the queue is on"
     if busy():
-        return "una sessione, ma c'è del lavoro in volo: la coda è attiva"
-    return "una sessione sola: i comandi non passano dalla coda"
+        return "one session, but there is work in flight, so the queue is on"
+    return "one session on its own, so commands do not go through the queue"

@@ -1,9 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="494" height="294" viewBox="0 0 494 294" font-family="ui-monospace,SFMono-Regular,Menlo,DejaVu Sans Mono,monospace" font-size="13">
-<rect width="494" height="294" rx="10" fill="#12161c"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="294" viewBox="0 0 800 294" font-family="ui-monospace,SFMono-Regular,Menlo,DejaVu Sans Mono,monospace" font-size="13">
+<rect width="800" height="294" rx="10" fill="#12161c"/>
 <circle cx="24" cy="22" r="5.5" fill="#ff5f57"/>
 <circle cx="42" cy="22" r="5.5" fill="#febc2e"/>
 <circle cx="60" cy="22" r="5.5" fill="#28c840"/>
-<text x="247.0" y="27" fill="#7d8590" text-anchor="middle" font-size="12">rada doctor</text>
+<text x="400.0" y="27" fill="#7d8590" text-anchor="middle" font-size="12">rada doctor</text>
 <text x="22" y="57" fill="#58a6ff" xml:space="preserve">rada 0.1.0</text>
 <text x="22" y="76" fill="#c9d1d9" xml:space="preserve">  repo         ~/dev/rada</text>
 <text x="22" y="95" fill="#3fb950" xml:space="preserve">  v wrapper      ~/dev/rada/bin/rada</text>
@@ -13,7 +13,7 @@
 <text x="22" y="171" fill="#c9d1d9" xml:space="preserve">  - mode         gate</text>
 <text x="22" y="190" fill="#3fb950" xml:space="preserve">  v patterns     ~/.rada/heavy.txt</text>
 <text x="22" y="209" fill="#3fb950" xml:space="preserve">  v judge        claude found at ~/.local/bin/claude</text>
-<text x="22" y="228" fill="#3fb950" xml:space="preserve">  v state        3 waiting, 1 running, 3 learned</text>
+<text x="22" y="228" fill="#3fb950" xml:space="preserve">  v state        4 waiting, 1 running, 3 learned, 1 left behind by sessions that have gone</text>
 <text x="22" y="247" fill="#c9d1d9" xml:space="preserve"></text>
 <text x="22" y="266" fill="#c9d1d9" xml:space="preserve">all good</text>
 </svg>

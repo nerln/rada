@@ -86,9 +86,19 @@ def _render(tickets, now):
     return "\n".join(lines)
 
 
+def _judgeable(d):
+    """The tickets worth spending a model call on.
+
+    A ticket a person has held is not going to start whatever the verdict says, so
+    asking about it buys nothing and puts one more command line in front of a model
+    that is being asked to sort a list.
+    """
+    return {t: tk for t, tk in (d.get("tickets") or {}).items() if not tk.get("hold")}
+
+
 def should_run(d, now=None):
     now = now or time.time()
-    if len(d.get("tickets", {})) < MIN_QUEUE:
+    if len(_judgeable(d)) < MIN_QUEUE:
         return False
     j = d.get("judge") or {}
     if j.get("running_pid") and _alive(j["running_pid"]) and now - j.get("running_ts", 0) < TIMEOUT:
@@ -113,7 +123,7 @@ def duty(d, tid, now=None):
     """
     if not should_run(d, now):
         return False
-    tickets = d.get("tickets", {})
+    tickets = _judgeable(d)
     if tid not in tickets:
         return False
     oldest = min(tickets, key=lambda t: tickets[t].get("enq", 0))
@@ -250,7 +260,7 @@ def run_and_record(tid):
         st.d.setdefault("judge", {})
         st.d["judge"]["running_pid"] = os.getpid()
         st.d["judge"]["running_ts"] = now
-        tickets = dict(st.d["tickets"])
+        tickets = _judgeable(st.d)
 
     # Ask about the oldest few only. A queue of twenty makes a long prompt, a slow
     # answer and a permutation the model is more likely to get wrong, and the jobs

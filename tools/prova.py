@@ -599,6 +599,141 @@ check("forcing an unknown ticket fails clearly",
       p.returncode == 1 and "no waiting job" in p.stderr, p.stderr[:120])
 
 
+# ------------------------------------------------------ 7c. holding a job, and the plan
+
+section("7c. holding a job, and what the queue says will happen")
+
+fresh()
+GB = 1024 ** 3
+real_snapshot3 = mem.snapshot
+try:
+    stub_mem(8 * GB)
+    d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d, "held", age=900, need=1 * GB, now=now)
+    mk(d, "behind", age=10, need=1 * GB, now=now)
+    check("before the hold, the older job leads", sched.order(d, now)[0] == "held")
+
+    d["tickets"]["held"]["hold"] = {"since": now - 5, "note": "not yet"}
+    r = sched.decide(d, "held", now)
+    check("a held job does not start even with the whole budget free",
+          not r["go"] and r.get("held"), str(r)[:120])
+    check("and the reason says who held it and why", "held by you" in r["why"]
+          and "not yet" in r["why"], r["why"])
+    check("a held job stands aside instead of leading the queue",
+          sched.order(d, now) == ["behind", "held"], str(sched.order(d, now)))
+    check("the job behind it starts", sched.decide(d, "behind", now)["go"])
+
+    # Ageing continues while held: releasing it must not send it to the back.
+    d["tickets"]["held"].pop("hold")
+    check("releasing gives it back the place its age earns",
+          sched.order(d, now)[0] == "held")
+
+    # A held head must not hold the machine open for itself.
+    stub_mem(1 * GB)
+    d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d, "bighold", age=900, need=6 * GB, now=now)
+    mk(d, "little", age=10, need=256 * 1024 ** 2, now=now)
+    d["tickets"]["bighold"]["hold"] = {"since": now}
+    sched.decide(d, "bighold", now)
+    check("a held job takes no reservation", not (d.get("reserve") or {}).get("id"),
+          str(d.get("reserve")))
+    check("so a small job behind it is not held back",
+          sched.decide(d, "little", now)["go"])
+
+    # A reservation already granted, then held, is given back by the reaper.
+    d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d, "res", age=900, need=6 * GB, now=now)
+    d["reserve"] = {"id": "res", "since": now - 10, "fails": 0}
+    d["tickets"]["res"]["hold"] = {"since": now}
+    sched.reap(d, now)
+    check("a reservation belonging to a job that has since been held is dropped",
+          not (d.get("reserve") or {}).get("id"), str(d.get("reserve")))
+
+    # The judge is not asked about jobs nobody intends to run.
+    d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d, "one", age=100, need=1 * GB, now=now)
+    mk(d, "two", age=90, need=1 * GB, now=now)
+    check("two live jobs are worth a verdict", judge.should_run(d, now))
+    d["tickets"]["two"]["hold"] = {"since": now}
+    check("one live job and one held is not", not judge.should_run(d, now))
+
+    # The plan answers the question a person is actually asking.
+    stub_mem(2 * GB)
+    d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    for name, age in (("a", 300), ("b", 200), ("c", 100)):
+        mk(d, name, age=age, need=1 * GB, now=now)
+    single = [sched.decide(d, t, now)["go"] for t in ("a", "b", "c")]
+    check("asked one at a time, more jobs claim the same memory than it holds",
+          sum(single) >= 2, str(single))
+    steps = sched.plan(d, now)
+    check("the plan admits only what fits once the ones ahead have taken theirs",
+          sum(1 for _, r in steps if r["go"]) == 1, str([(t, r["go"]) for t, r in steps]))
+    check("and it is the head that goes", steps[0][0] == "a" and steps[0][1]["go"])
+    check("the plan leaves the real state alone",
+          not (d.get("reserve") or {}).get("id") and set(d["tickets"]) == {"a", "b", "c"})
+finally:
+    mem.snapshot = real_snapshot3
+
+# The picture the window reads. It must survive an empty machine and a full one.
+env = dict(os.environ, RADA_HOME=TMP, RADA_DISABLE="0")
+RADA = os.path.join(ROOT, "bin", "rada")
+fresh()
+p = subprocess.run([sys.executable, RADA, "status", "--json"], capture_output=True,
+                   text=True, env=env)
+try:
+    shot = json.loads(p.stdout)
+except Exception:
+    shot = None
+check("status --json is one JSON object even with nothing queued", shot is not None,
+      p.stdout[:200] + p.stderr[:200])
+if shot:
+    check("it carries the memory the queue is spending against",
+          set(shot["memory"]) >= {"budget", "promised", "free", "clamped"},
+          str(shot.get("memory"))[:160])
+    check("and empty lists rather than missing keys",
+          shot["waiting"] == [] and shot["running"] == [])
+
+d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+d["tickets"]["deadbeef"] = {"sid": "s", "cwd": "/tmp", "project": "molo", "sig": "x",
+                            "show": "python3 long.py", "need": 9 * GB,
+                            "enq": time.time() - 30, "pid": os.getpid(),
+                            "seen": time.time(), "hold": {"since": time.time(),
+                                                          "note": "the disk is full"}}
+with store.Transaction() as st:
+    st.d.update(d)
+p = subprocess.run([sys.executable, RADA, "status", "--json"], capture_output=True,
+                   text=True, env=dict(env, RADA_FAKE_BUDGET="1G"))
+shot = json.loads(p.stdout)
+job = shot["waiting"][0]
+check("a held job reaches the window as held, with the note",
+      job["held"] and job["hold"]["note"] == "the disk is full", str(job)[:200])
+check("and with the sentence sched.py wrote, not one the window invented",
+      "held by you" in job["why"], job["why"])
+check("nothing that is held is reported as about to start", not job["will_start"])
+
+p = subprocess.run([sys.executable, RADA, "hold", "deadbeef", "--release"],
+                   capture_output=True, text=True, env=env)
+check("releasing from the command line says the place is kept",
+      p.returncode == 0 and "back in the queue" in p.stdout, p.stdout[:120])
+p = subprocess.run([sys.executable, RADA, "hold", "nosuchjob"], capture_output=True,
+                   text=True, env=env)
+check("holding an unknown ticket fails clearly",
+      p.returncode == 1 and "no waiting job" in p.stderr, p.stderr[:120])
+
+p = subprocess.run([sys.executable, RADA, "force", "deadbeef"], capture_output=True,
+                   text=True, env=env)
+p2 = subprocess.run([sys.executable, RADA, "hold", "deadbeef"], capture_output=True,
+                    text=True, env=env)
+check("holding a forced job cancels the force instead of arguing with it",
+      "force on it is cancelled" in p2.stdout
+      and not (store.read()["tickets"]["deadbeef"].get("force")), p2.stdout[:160])
+p3 = subprocess.run([sys.executable, RADA, "force", "deadbeef"], capture_output=True,
+                    text=True, env=env)
+check("and forcing a held job lifts the hold",
+      "hold on it is lifted" in p3.stdout
+      and not (store.read()["tickets"]["deadbeef"].get("hold")), p3.stdout[:160])
+
+
 # ------------------------------------------------------- 8. real contention, real processes
 
 section("8. two waiters, one berth")

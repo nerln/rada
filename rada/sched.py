@@ -31,6 +31,14 @@ for as long as it likes, and no scheduler that refuses to kill user processes ca
 otherwise. What rada promises is that a waiting job is passed by a bounded number of
 other jobs, and that the bound is fixed the moment the job becomes mandatory.
 
+Both lemmas are about the judge, which is the part of rada that can be wrong or be
+talked into being wrong. A person is not in that category. `force` starts a job the
+budget refuses and `hold` keeps a job from starting at all, and neither is bounded by
+anything above: someone at the keyboard knows the editor is about to close, or that the
+job they are looking at is the wrong one. What rada owes them in exchange is that both
+are visible wherever the queue is, and that a held ticket keeps ageing while it waits,
+so lifting a hold does not send the job to the back of the queue it never left.
+
 The other half of the problem is that a big job never fits under ordinary load. Priority
 cannot rescue it, because the gate is a byte comparison. That is what reservation is for:
 when the head of the queue does not fit, rada stops admitting anything that would eat
@@ -38,6 +46,7 @@ into the head's share and lets the machine drain. Reservation is granted by age 
 never by the judge, because a reservation throttles the whole machine and that is too
 much authority to hand to a model reading untrusted text.
 """
+import copy
 import os
 import time
 
@@ -77,7 +86,10 @@ def reap(d, now=None):
             gone.append(("ticket", tid))
             d["tickets"].pop(tid, None)
     res = d.get("reserve") or {}
-    if res.get("id") and res["id"] not in d["tickets"]:
+    # A reservation belonging to a ticket a person has since held is a reservation for
+    # a job that is not coming, and everything behind it would wait for it.
+    if res.get("id") and (res["id"] not in d["tickets"]
+                          or held(d["tickets"][res["id"]])):
         d["reserve"] = {}
     return gone
 
@@ -116,18 +128,40 @@ def judge_bonus(d, tid, now=None):
     return CAP * (1.0 - rank / (len(order) - 1))
 
 
+def held(tk):
+    """Has a person told this ticket to stay where it is?"""
+    return bool((tk or {}).get("hold"))
+
+
+def hold_why(tk):
+    note = ((tk or {}).get("hold") or {}).get("note")
+    base = "held by you: it keeps its place in the queue and does not start"
+    return f"{base}, {note}" if note else base
+
+
 def order(d, now=None):
-    """The queue, most deserving first. Mandatory tickets lead, ordered by arrival."""
+    """The queue, most deserving first. Mandatory tickets lead, ordered by arrival.
+
+    Held tickets come last, whatever their age. A ticket a person has held is one that
+    is not going to start, and leaving it at the head means it reserves memory nobody
+    is going to use and everything behind it waits for a job that was never coming. It
+    keeps ageing where it sits, so releasing a hold returns the ticket to the position
+    its arrival time earns rather than to the back.
+    """
     now = now or time.time()
     tickets = d["tickets"]
-    mandatory, rest = [], []
+    mandatory, rest, waiting_on_a_person = [], [], []
     for tid, tk in tickets.items():
+        if held(tk):
+            waiting_on_a_person.append(tid)
+            continue
         age = now - tk.get("enq", now)
         (mandatory if age >= _cfg("MANDATORY_AFTER", MANDATORY_AFTER) else rest).append(tid)
     mandatory.sort(key=lambda t: tickets[t].get("enq", 0))
     rest.sort(key=lambda t: (-(now - tickets[t].get("enq", now)) / _cfg("TAU", TAU)
                              - judge_bonus(d, t, now), tickets[t].get("enq", 0)))
-    return mandatory + rest
+    waiting_on_a_person.sort(key=lambda t: tickets[t].get("enq", 0))
+    return mandatory + rest + waiting_on_a_person
 
 
 DECLARED_HEADROOM = 1.10
@@ -182,6 +216,16 @@ def decide(d, tid, now=None):
     tk = d["tickets"].get(tid)
     if tk is None:
         return {"go": True, "why": "ticket vanished, running ungated"}
+
+    if held(tk):
+        # No amount of free memory revokes this, and neither does the queue emptying.
+        # It is answered before the budget is even read, because reading the budget
+        # here would produce a sentence about memory for a job whose problem is not
+        # memory.
+        q = order(d, now)
+        return {"go": False, "held": True, "why": hold_why(tk),
+                "facts": {"pos": (q.index(tid) + 1) if tid in q else 1,
+                          "queued": len(q), "age": now - tk.get("enq", now)}}
 
     ready, note = forced_ready(d, tk, now)
     if ready:
@@ -272,6 +316,39 @@ def decide(d, tid, now=None):
     return {"go": False, "facts": facts,
             "why": (f"needs {mem.human(need)}, only {mem.human(free)} free"
                     + (f"; {'; '.join(snap['clamped'])}" if snap["clamped"] else ""))}
+
+
+def plan(d, now=None):
+    """Walk the whole queue and say what would happen, in order, right now.
+
+    `decide` answers about one ticket against the machine as it stands. Somebody looking
+    at the queue is asking a different question: which of these start, given that the
+    ones ahead start first and take their memory with them. Answering that by calling
+    `decide` on each ticket in turn gives the wrong picture, because every ticket is told
+    about the same free memory and three jobs that each fit on their own are all reported
+    as starting when only one of them will.
+
+    So the walk happens on a copy, and every ticket the copy admits becomes a running job
+    in that copy before the next one is asked about. Returns a list of (id, decision) in
+    queue order. The real state is not touched, which also means the reservations that
+    `decide` writes while it reasons are thrown away with the copy.
+    """
+    now = now or time.time()
+    work = copy.deepcopy(d)
+    out = []
+    for tid in order(work, now):
+        d2 = decide(work, tid, now)
+        out.append((tid, d2))
+        if d2.get("go"):
+            tk = work["tickets"].pop(tid, {})
+            # Deliberately not grant(): that writes to the log and takes a pid, and
+            # this job is imaginary.
+            work["leases"][tid] = {"need": tk.get("need", DEFAULT_NEED), "pid": None,
+                                   "pgid": None, "start": now,
+                                   "sig": tk.get("sig", ""),
+                                   "project": tk.get("project", ""),
+                                   "show": tk.get("show", "")}
+    return out
 
 
 def grant(d, tid, pid, pgid, now=None):

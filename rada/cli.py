@@ -10,7 +10,12 @@ Usage:
   rada judge                     run the judge once, for debugging
   rada force <id>                start a queued job now, ignoring the memory budget
   rada force <id> --after <id>   start it once another job has finished
+  rada hold <id>                 keep a queued job from starting until you release it
+  rada hold <id> --release       let it back into the queue
+  rada reap                      let go of jobs whose process is gone
   rada reset                     forget all state
+
+  rada status --json             the same picture as data, which is what the app reads
 
 Options for run:
   --need 6G       declare the memory this job needs, instead of letting rada estimate
@@ -22,6 +27,7 @@ Anything that goes wrong in rada lets the command run. A scheduler that blocks w
 because it is confused is worse than no scheduler.
 """
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -360,7 +366,144 @@ def cmd_run(args):
 
 # --------------------------------------------------------------------------------- views
 
+def swept(d, now=None):
+    """The queue with the dead taken out of it, and what was taken out.
+
+    A berth belongs to a process, and rada finds out that the process has gone only when
+    somebody takes the lock. Reading does not take the lock. So on a quiet machine a job
+    that finished an hour ago is still in the file, still on the screen, and the memory
+    it was promised is still counted against the budget: the queue reads as busy, the
+    budget reads as small, and nothing on screen says which of the jobs are still there.
+
+    Both views are taken from the swept copy, so the numbers are the ones that will apply
+    the moment anything takes the lock. What the sweep dropped is returned rather than
+    hidden, because a job that vanished is worth seeing once, with its name, and letting
+    go of on purpose.
+
+    Nothing on disk is touched here. `rada reap` is the one that writes.
+    """
+    now = now or time.time()
+    clean = copy.deepcopy(d)
+    left = []
+    for kind, tid in sched.reap(clean, now):
+        was = (d.get("leases", {}) if kind == "lease" else d.get("tickets", {})).get(tid, {})
+        last = was.get("seen") or was.get("start") or was.get("enq") or now
+        left.append({
+            "id": tid,
+            "kind": kind,
+            "project": was.get("project", ""),
+            "command": was.get("show", ""),
+            "need": was.get("need", 0),
+            "pid": was.get("pid"),
+            "last_seen": last,
+            "silent_for": now - last,
+            # Only a berth was promised memory. A ticket was waiting its turn and
+            # holding nothing, so it costs a line on the screen and no bytes.
+            "holding": was.get("need", 0) if kind == "lease" else 0,
+        })
+    return clean, left
+
+
+def picture(d, now=None):
+    """Everything a person needs to judge the queue, as plain data.
+
+    One reader other than a terminal exists, the window in macapp/, and it must not
+    contain a second copy of the admission rule. So it asks this, and every sentence it
+    shows about why a job is waiting is the sentence sched.py wrote.
+
+    The `why` on each waiting job comes from sched.plan, not from sched.decide: the
+    question a person is asking while looking at a queue is which of these start, and
+    that has to account for the ones ahead taking their memory first.
+    """
+    now = now or time.time()
+    d, left = swept(d, now)
+    snap = mem.snapshot()
+    com = sched.committed(d)
+    plan = dict(sched.plan(d, now))
+    q = sched.order(d, now)
+
+    waiting = []
+    for i, tid in enumerate(q, 1):
+        tk = d["tickets"][tid]
+        verdict = plan.get(tid, {})
+        waiting.append({
+            "id": tid,
+            "position": i,
+            "project": tk.get("project", ""),
+            "cwd": tk.get("cwd", ""),
+            "command": tk.get("show", ""),
+            "note": tk.get("intent") or "",
+            "need": tk.get("need") or sched.DEFAULT_NEED,
+            "declared": bool(tk.get("declared")),
+            "queued_at": tk.get("enq", now),
+            "age": now - tk.get("enq", now),
+            "session": tk.get("sid", ""),
+            "mandatory": (now - tk.get("enq", now)) >= sched.MANDATORY_AFTER,
+            "judge_bonus": round(sched.judge_bonus(d, tid, now), 2),
+            "hold": tk.get("hold") or None,
+            "force": tk.get("force") or None,
+            "will_start": bool(verdict.get("go")),
+            "why": verdict.get("why", ""),
+            "held": bool(verdict.get("held")),
+            "impossible_for_now": bool(verdict.get("impossible_for_now")),
+            "blockers": (verdict.get("facts") or {}).get("blockers") or [],
+        })
+
+    running = []
+    for tid, ls in sorted(d["leases"].items(), key=lambda kv: kv[1].get("start", 0)):
+        running.append({
+            "id": tid,
+            "project": ls.get("project", ""),
+            "command": ls.get("show", ""),
+            "need": ls.get("need", 0),
+            "peak": ls.get("peak", 0),
+            "started_at": ls.get("start", now),
+            "seconds": now - ls.get("start", now),
+            "pid": ls.get("pid"),
+        })
+
+    res = d.get("reserve") or {}
+    j = d.get("judge") or {}
+    try:
+        from rada import sessions
+        where = sessions.describe(now=now)
+    except Exception:
+        where = ""
+    return {
+        "v": 1,
+        "rada": __version__,
+        "now": now,
+        "memory": {"total": mem.TOTAL, "used": snap.get("used", 0),
+                   "budget": snap["budget"], "promised": com,
+                   "free": snap["budget"] - com, "reserve": snap.get("reserve", 0),
+                   "pressure": snap.get("pressure", 1), "jetsam": snap.get("jetsam", 100),
+                   "swap_used": snap.get("swap_used", 0),
+                   "swap_total": snap.get("swap_total", 0),
+                   "clamped": snap.get("clamped", []),
+                   "unknown_platform": bool(snap.get("unknown_platform"))},
+        "sessions": where,
+        "running": running,
+        "waiting": waiting,
+        "left_behind": left,
+        "judge": {"at": j.get("ts", 0), "age": (now - j["ts"]) if j.get("ts") else None,
+                  "order": j.get("order") or [], "why": j.get("why") or ""},
+        "reservation": {"id": res.get("id"), "since": res.get("since"),
+                        "cooldown_until": res.get("until"), "fails": res.get("fails", 0)},
+        "learned": len(d.get("learn") or {}),
+    }
+
+
 def cmd_status(args):
+    if getattr(args, "json", False):
+        try:
+            d = store.read()
+        except store.SchemaMismatch as e:
+            json.dump({"error": str(e)}, sys.stdout)
+            print()
+            return 1
+        json.dump(picture(d), sys.stdout)
+        print()
+        return 0
     try:
         d = store.read()
     except store.SchemaMismatch as e:
@@ -368,6 +511,7 @@ def cmd_status(args):
               f"run `rada reset` if that version is gone")
         return 1
     now = time.time()
+    d, left = swept(d, now)
     snap = mem.snapshot()
     com = sched.committed(d)
     print(f"rada {__version__}   budget {mem.human(snap['budget'])}"
@@ -395,10 +539,15 @@ def cmd_status(args):
         for i, tid in enumerate(q, 1):
             tk = d["tickets"][tid]
             age = now - tk.get("enq", now)
-            flag = "!" if age >= sched.MANDATORY_AFTER else " "
+            flag = ("h" if sched.held(tk)
+                    else "!" if age >= sched.MANDATORY_AFTER else " ")
             print(f" {flag}{i:>2}. {tid}  {int(age):>5}s  "
                   f"{mem.human(tk.get('need')):>8}  {tk.get('project','?'):<14} "
                   f"{tk.get('show','')[:55]}")
+        for tid in q:
+            tk = d["tickets"][tid]
+            if sched.held(tk):
+                print(f"  {tid} is {sched.hold_why(tk)}")
         for tid in q:
             tk = d["tickets"][tid]
             f = tk.get("force")
@@ -414,6 +563,14 @@ def cmd_status(args):
             print(f"  reservation on cooldown for {int(res['until'] - now)}s")
     if not d["leases"] and not d["tickets"]:
         print("\nnothing queued")
+    if left:
+        print("\nleft behind")
+        for e in left:
+            what = ("was promised " + mem.human(e["holding"]) if e["holding"]
+                    else "was waiting its turn")
+            print(f"  {e['id']}  {what}, nothing heard for "
+                  f"{int(e['silent_for'] // 60)} min  {e['command'][:44]}")
+        print("  their processes are gone; `rada reap` lets go of them")
     j = d.get("judge") or {}
     if j.get("ts"):
         print(f"\njudge {int(now - j['ts'])}s ago: {j.get('why') or '(no reason given)'}")
@@ -499,6 +656,7 @@ def cmd_force(args):
             st.d["tickets"][tid].pop("force", None)
             print(f"{tid} is back in the ordinary queue")
             return 0
+        was_held = st.d["tickets"][tid].pop("hold", None)
         f = {}
         if args.after:
             others = [t for t in list(st.d["tickets"]) + list(st.d["leases"])
@@ -515,7 +673,83 @@ def cmd_force(args):
         show = st.d["tickets"][tid].get("show", "")[:70]
         store.log(f"forced {tid} {when}: {show}")
     print(f"{tid} will start {when}, ignoring the memory budget")
+    if was_held:
+        # Leaving both marks on one ticket would mean answering "start it now" with
+        # "it is held", which is a way of ignoring what was just typed.
+        print("  the hold on it is lifted")
     print(f"  {show}")
+    return 0
+
+
+def cmd_hold(args):
+    """Keep a queued job from starting until a person says otherwise.
+
+    The opposite end of `force`, and the reason it exists is the same. rada decides by
+    memory and by age, and neither of those knows that the run in front of you is the one
+    with the wrong config in it, or that the machine is about to be needed for a call. A
+    hold takes a job out of the running without taking it out of the queue: it keeps its
+    place, it keeps ageing, and it starts when it is released.
+    """
+    with store.Transaction() as st:
+        if not st.ok:
+            print("could not take the lock", file=sys.stderr)
+            return 1
+        sched.reap(st.d)
+        matches = [t for t in st.d["tickets"] if t.startswith(args.ticket)]
+        if not matches:
+            running = [t for t in st.d["leases"] if t.startswith(args.ticket)]
+            print(f"no waiting job starts with {args.ticket!r}"
+                  + (" (it is already running, and rada does not stop what it started)"
+                     if running else ""), file=sys.stderr)
+            return 1
+        if len(matches) > 1:
+            print(f"{args.ticket!r} matches {', '.join(matches)}; be more specific",
+                  file=sys.stderr)
+            return 1
+        tid = matches[0]
+        tk = st.d["tickets"][tid]
+        show = tk.get("show", "")[:70]
+        if args.release:
+            if not tk.pop("hold", None):
+                print(f"{tid} was not held")
+                return 0
+            store.log(f"released {tid}: {show}")
+            print(f"{tid} is back in the queue, with the age it had")
+            print(f"  {show}")
+            return 0
+        had_force = tk.pop("force", None)
+        tk["hold"] = {"since": time.time(), "note": args.note or ""}
+        if (st.d.get("reserve") or {}).get("id") == tid:
+            # It was holding the machine open for itself. Nobody should wait behind a
+            # job that is not going to start.
+            st.d["reserve"] = {}
+        store.log(f"held {tid}: {show}")
+    print(f"{tid} will not start until you run: rada hold {tid} --release")
+    if had_force:
+        print("  the force on it is cancelled")
+    print(f"  {show}")
+    return 0
+
+
+def cmd_reap(args):
+    """Let go of jobs whose process is gone.
+
+    Every waiter does this before deciding anything, so on a busy machine nobody ever
+    needs to run it. It is here for the quiet case: one job finished, nothing was queued
+    after it, and its berth sat in the file with nobody taking the lock to notice.
+    Nothing running is touched and nothing is killed.
+    """
+    with store.Transaction() as st:
+        if not st.ok:
+            print("could not take the lock", file=sys.stderr)
+            return 1
+        gone = sched.reap(st.d)
+    if not gone:
+        print("nothing to let go of")
+        return 0
+    for kind, tid in gone:
+        print(f"let go of {tid}, the {'berth' if kind == 'lease' else 'ticket'} of a "
+              f"process that is no longer there")
     return 0
 
 
@@ -547,8 +781,12 @@ def main(argv=None):
     r.add_argument("command", nargs=argparse.REMAINDER)
     r.set_defaults(fn=cmd_run)
 
-    for name, fn, helptext in (("status", cmd_status, "what is running and waiting"),
-                               ("watch", cmd_watch, "status, refreshed"),
+    s = sub.add_parser("status", help="what is running and waiting")
+    s.add_argument("--json", action="store_true",
+                   help="the same picture as one line of JSON, for the app and for scripts")
+    s.set_defaults(fn=cmd_status)
+
+    for name, fn, helptext in (("watch", cmd_watch, "status, refreshed"),
                                ("judge", cmd_judge, "run the judge once")):
         s = sub.add_parser(name, help=helptext)
         s.set_defaults(fn=fn)
@@ -565,6 +803,15 @@ def main(argv=None):
                    help="wait until that job has finished, then go")
     s.add_argument("--cancel", action="store_true", help="undo a force")
     s.set_defaults(fn=cmd_force)
+
+    s = sub.add_parser("reap", help="let go of jobs whose process is gone")
+    s.set_defaults(fn=cmd_reap)
+
+    s = sub.add_parser("hold", help="keep a queued job from starting until you release it")
+    s.add_argument("ticket", help="the ticket id, or enough of its start to be unique")
+    s.add_argument("--release", action="store_true", help="let it back into the queue")
+    s.add_argument("--note", help="one line saying why, shown wherever the queue is")
+    s.set_defaults(fn=cmd_hold)
 
     s = sub.add_parser("mode", help="gate (queue heavy commands) or advise (do nothing)")
     s.add_argument("which", nargs="?", choices=["gate", "advise"])

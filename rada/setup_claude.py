@@ -261,9 +261,16 @@ def doctor():
                    "the queue will use arrival order only")
 
     try:
-        d = store.read()
-        out.append(f"  v state        {len(d['tickets'])} waiting, {len(d['leases'])} running,"
-                   f" {len(d.get('learn', {}))} learned")
+        # The same swept view `rada status` prints. Counting the raw file here reported
+        # a berth belonging to a session that closed an hour ago as a running job, which
+        # is the one number somebody checking an installation should not have to doubt.
+        from rada.cli import swept
+        d, left = swept(store.read())
+        line = (f"  v state        {len(d['tickets'])} waiting, {len(d['leases'])} running,"
+                f" {len(d.get('learn', {}))} learned")
+        if left:
+            line += f", {len(left)} left behind by sessions that have gone"
+        out.append(line)
     except store.SchemaMismatch as e:
         out.append(f"  x state        {e}")
         ok = False

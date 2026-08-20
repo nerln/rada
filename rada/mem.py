@@ -16,6 +16,7 @@ not 4096. Hardcoding 4096 gives numbers four times too small, which looks plausi
 """
 import ctypes
 import ctypes.util
+import json
 import os
 import re
 import subprocess
@@ -106,6 +107,31 @@ def _forced_budget():
     return int(float(m.group(1)) * mult[m.group(2).lower()])
 
 
+def _forced_snapshot(snap):
+    """RADA_FAKE_MEMORY overrides fields of a snapshot, given as a JSON object.
+
+    It exists for the pictures under docs/, which are made by running the real commands
+    and drawing what they printed. The machine that regenerates them is usually the
+    machine that needed rada in the first place, and a picture whose budget line says
+    three gigabytes are free while the line under it says the kernel is at pressure two
+    is a picture of two different machines. Setting the numbers here keeps the sentences
+    in the picture the ones rada actually writes.
+
+    Also the quick way to reproduce a report: paste the numbers somebody sent and read
+    the same output they were reading.
+    """
+    raw = os.environ.get("RADA_FAKE_MEMORY")
+    if not raw:
+        return snap
+    try:
+        over = json.loads(raw)
+    except Exception:
+        return snap
+    if isinstance(over, dict):
+        snap.update({k: v for k, v in over.items() if k in snap})
+    return snap
+
+
 def snapshot(reserve_frac=0.15, reserve_floor=1536 * 1024 ** 2):
     """Everything the scheduler needs about memory, in one cheap call.
 
@@ -119,9 +145,10 @@ def snapshot(reserve_frac=0.15, reserve_floor=1536 * 1024 ** 2):
         # Not macOS, or the call failed. Fail open: report the machine as roomy rather
         # than blocking every job on a platform this module does not understand.
         forced = _forced_budget()
-        return {"budget": TOTAL if forced is None else forced, "used": 0, "reserve": 0,
-                "pressure": 1, "jetsam": 100, "swap_used": 0, "swap_total": 0,
-                "clamped": [], "unknown_platform": forced is None}
+        return _forced_snapshot(
+            {"budget": TOTAL if forced is None else forced, "used": 0, "reserve": 0,
+             "pressure": 1, "jetsam": 100, "swap_used": 0, "swap_total": 0,
+             "clamped": [], "unknown_platform": forced is None})
 
     sw = swap()
     lvl, pct = pressure(), jetsam_pct()
@@ -148,10 +175,11 @@ def snapshot(reserve_frac=0.15, reserve_floor=1536 * 1024 ** 2):
         budget = forced
         clamped = [f"budget pinned to {human(forced)} by RADA_FAKE_BUDGET"]
 
-    return {"budget": budget, "used": used, "reserve": reserve, "wired": wired,
-            "compressor": comp, "anon": anon, "filebacked": s.external_page_count * PAGE,
-            "pressure": lvl, "jetsam": pct, "swap_used": sw["used"],
-            "swap_total": sw["total"], "clamped": clamped, "unknown_platform": False}
+    return _forced_snapshot(
+        {"budget": budget, "used": used, "reserve": reserve, "wired": wired,
+         "compressor": comp, "anon": anon, "filebacked": s.external_page_count * PAGE,
+         "pressure": lvl, "jetsam": pct, "swap_used": sw["used"],
+         "swap_total": sw["total"], "clamped": clamped, "unknown_platform": False})
 
 
 def available():
