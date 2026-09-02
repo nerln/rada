@@ -46,6 +46,9 @@ nightly re-index, and arrival order cannot.
     the wrapper takes a ticket ─────────► queue ──► judge orders it
       │                                        │
       │                                        ▼
+      │                                   is rada running anything? ─ no ─► the head goes
+      │                                        │ yes
+      │                                        ▼
       │                                   is there room, and is it your turn?
       ├─ no ──► waits, printing why, and who is holding the memory
       └─ yes ─► runs the original command, measures what it really used
@@ -190,8 +193,10 @@ the budget is
 
 with a reserve of 15 percent or 1.5 GB, whichever is larger, and hard stops at kernel
 pressure above normal, at the kernel's own free estimate below 25 percent, and a clamp
-when swap is more than three quarters full. A job is admitted only if its estimate times
-1.3 fits.
+when swap has grown deeper than half the memory of the machine. A job is admitted only if
+its estimate fits with a margin: thirty percent more than a footprint rada learned by
+watching, ten percent more than a number a person typed with `--need`, since that number
+already carries their own margin.
 
 The estimate comes from the job itself. rada samples the whole process group's physical
 footprint while it runs and remembers the peak against a signature of the command with
@@ -208,6 +213,69 @@ When draining could get there, rada reserves: it stops admitting anything that w
 the head's share and lets the machine drain, allowing only short jobs to slip underneath.
 If the head still does not fit after seven minutes, rada gives up the reservation with a
 growing cooldown and lets everyone else run in the meantime.
+
+## Carrying nothing, rada stands aside
+
+All of that decides who goes while rada is carrying something. When it is carrying
+nothing, it stands aside: the head of the queue starts whatever the budget says.
+
+Measured on a 16 GB laptop with an empty queue: a job declared at 4 GB was told to wait
+for memory held by a browser, a music player and two editors, and rada had already worked
+out that no queued job was ever going to hand that memory back. It printed exactly that,
+and waited anyway. The same command with rada uninstalled would have started, and macOS
+would have paged for it, which is what paging is for.
+
+So with no berth out, the oldest ticket is measured against a different number and goes.
+That number is what is free right now plus an allowance of paging, because macOS pages
+and a job that has the machine to itself is what paging is for. The estimate is charged
+the same margin the budget charges it, thirty percent for a footprint rada learned and
+ten for one a person typed.
+
+The bar moves with the machine, twice over. The resident set takes from it directly, so
+whatever the last job took comes off what the next one may ask for. And the allowance,
+at most a quarter of the machine, is never more than what is left before swap reaches
+the depth that stops the rule outright, so that stop is a slope rather than a cliff: with
+seven gigabytes already paged out on a sixteen gigabyte laptop, the allowance is the last
+gigabyte before half the machine is on disk.
+
+What one of these jobs promised is also held against the next one until its memory
+appears. A berth would have covered that, and a berth is what is missing: the wrapper
+exits with its child, and a job that puts itself in the background exits its child at
+once. Five jobs declared at twelve gigabytes were admitted one after another that way,
+none of them having allocated anything yet.
+
+The bar was the size of the machine for an afternoon, which is not a bar at all. On this
+laptop, with thirteen of sixteen gigabytes already resident, that admitted a job declared
+at twelve: twenty-five gigabytes of demand on sixteen gigabytes of memory. It was found by
+running it, not by reading it.
+
+The oldest by arrival that could actually start, since a job somebody has held or
+forced to a later time is answered by its own branch: counted among the candidates, one
+held ticket turned the rule off for the whole queue. And the oldest rather than the head
+of the queue. The head is where the judge's three
+points land, and skipping the budget is more authority than a reservation, which the same
+file refuses to hand to a model reading untrusted text. Five seconds separate one
+admission of this kind from the next, since what a job takes needs a moment to reach the
+number the bar is drawn against: five jobs declared at twelve gigabytes were admitted in
+the same second before that wait existed, each having backgrounded itself so that its
+berth ended with the shell that started it.
+
+Four readings still stop it. All four come from the kernel, against bars rada sets:
+memory pressure at level 4, the top the kernel has, and deliberately not the level-2
+warning that zeroes the budget, since surviving a routine warning is most of the point;
+the killer's own gauge below 25 percent; swap grown deeper than half the memory of the
+machine; and less than five gigabytes left on the disk those swap files are made from,
+since paging that has nowhere to go is not paging but a stall, and that was the one number
+about memory rada had never read. `rada status` says which of the two states you are in, under the
+memory lines, and `RADA_ALONE=0` puts the budget back in charge of the lone case.
+
+The swap clamp was rewritten at the same time and for the same reason. macOS makes swap
+files as it needs them, a gigabyte at a time, up to the free space on the disk, so the
+old test of more than three quarters full was a ratio against a denominator the kernel
+resizes. On this machine it fired at 3.2 of 4.0 GiB while everything was fine, capping a
+budget it did not change and putting "over 75% full" into the reason every waiting job
+was given. The denominator moved afterwards, which is the argument in one
+observation: the pool on the same machine went from 4.0 to 8.0 GiB inside a day.
 
 ## Install
 
@@ -332,7 +400,8 @@ A job that needs more than the machine can free is not a scheduling problem. rad
 rather than waiting silently: it names the programs holding the memory, sends one desktop
 notification, and prints the command that overrides it. `rada force <id>` starts a job now
 and ignores the budget, and `rada force <id> --after <other>` sequences two jobs that
-would crush the machine together. A forced job is marked as forced in `rada status`, since
+would crush the machine together. It is needed less often now, since a job that
+arrives while rada is running nothing does not wait for anybody. A forced job is marked as forced in `rada status`, since
 the fairness lemmas describe the decisions rada makes on its own and a human override sits
 outside them.
 
@@ -404,7 +473,7 @@ python3 tools/prova.py                 # the queue
 swift test --package-path macapp       # the window
 ```
 
-158 checks, a couple of seconds, no model and no real memory allocated. They cover the
+212 checks, a couple of seconds, no model and no real memory allocated. They cover the
 rewrite refusing to leak shell operators or newlines, both fairness lemmas including a
 four-hundred-round adversarial simulation, lease recovery after a crash, the lock under
 four processes hammering it, the judge's output validation, reservation and backfill and
@@ -413,7 +482,16 @@ real process: that a job which cannot fit is refused rather than queued behind i
 forever, that re-checking a ticket does not take a second place in the line, and that a
 berth is given back when the server stops.
 
-They also cover holding: that a held job does not start with the whole budget free, that
+They also cover standing aside: that a job goes with nothing running and a budget of
+zero, that the same job waits the moment something is running, that top-level pressure and
+the jetsam floor and deep swap and a full disk each stop it on their own, that four gigabytes go on a
+machine with three free while twelve do not, that the same twelve go once the machine is
+empty, that a second admission of the kind waits a moment for the first job's memory to
+appear, that the judge cannot pick who skips the budget, that the head of an idle queue
+goes and the one behind it does not, that a hold and a delayed force still come first, and that `RADA_ALONE=0` puts the
+old behaviour back.
+
+They cover holding: that a held job does not start with the whole budget free, that
 it stands aside instead of leading the queue, that it takes no reservation and nothing
 queues behind it, that releasing gives back the place its age earns, and that the judge is
 not asked about jobs nobody intends to run.
@@ -424,7 +502,16 @@ what a vanished session left behind is kept apart from the live queue, and that 
 written exactly as `rada/mem.py` writes them, since a person comparing the window with a
 terminal is comparing two numbers for one thing.
 
-Two of those tests exist because they found real defects during development: two jobs
+One section exists for three defects the queue had all along, found while relaxing the
+rule above and fixed with it. A head that gave up its reservation so that everybody else
+could have a turn took it straight back on its next poll, three seconds later, because it
+emptied its own working copy of the reservation and then found none; the same line read
+the failure count out of that emptied copy, so the doubling backoff restarted at its
+first step every time; and the reservation was protected against backfilling jobs by the
+head's declared need read as zero when it was missing, rather than by the same floor
+every other part of the file charges.
+
+Two more tests exist because they found real defects during development: two jobs
 could be admitted at once because the admission decision and the lease were in different
 transactions, and the lock could be held by two processes at once because it announced
 itself before it said who owned it.

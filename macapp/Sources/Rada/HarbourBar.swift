@@ -1,14 +1,17 @@
 import SwiftUI
 
-/// The one line of context every decision on this screen is made against.
+/// The context every decision on this screen is made against.
 ///
-/// It sits above the queue rather than beside a job, because the number that decides
-/// whether anything starts is a property of the machine and not of any job in the list.
-/// Three quantities, in the order rada spends them: what is already promised to jobs
-/// that are running, what is left for the next one, and what the whole budget was.
+/// It sits above the queue rather than beside a job, because what decides whether
+/// anything starts is a property of the machine and not of any job in the list. Three
+/// quantities, in the order somebody reads them: what is left for the next job, what is
+/// already promised to the ones running, and what the whole budget was. Then the machine
+/// in its own words, then who else is here, and last the sentence that matters most on an
+/// empty queue: whether rada is about to hold the next job back at all.
 struct HarbourBar: View {
     let memory: Memory
     let sessions: String
+    let aside: StandingAside
     let reservation: Reservation
     let now: Double
 
@@ -39,6 +42,19 @@ struct HarbourBar: View {
                     Text("·").font(.caption).foregroundStyle(.tertiary)
                     Text(note).font(.caption).foregroundStyle(.secondary)
                 }
+                Spacer()
+            }
+
+            // Whether rada is about to hold anything back. Somebody looking at an empty
+            // queue is asking exactly this, and no list on the screen answers it.
+            HStack(spacing: 8) {
+                Image(systemName: aside.on ? "checkmark.circle.fill" : "arrow.triangle.branch")
+                    .imageScale(.small)
+                    .foregroundStyle(aside.on ? .green : .secondary)
+                Text(aside.why)
+                    .font(.caption)
+                    .foregroundStyle(aside.on ? .primary : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer()
             }
 

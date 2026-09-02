@@ -107,6 +107,23 @@ def _forced_budget():
     return int(float(m.group(1)) * mult[m.group(2).lower()])
 
 
+def disk_free(path="/System/Volumes/VM"):
+    """Bytes free on the volume the swap files live on.
+
+    macOS grows swap against this and nothing else, so it is the real ceiling on how much
+    paging a machine can do. rada read every other number about memory and never this one.
+    Falls back to the root volume, and to a large number if neither can be read, because
+    a reading that failed must not be the reason a job is refused.
+    """
+    for where in (path, "/"):
+        try:
+            st = os.statvfs(where)
+            return st.f_bavail * st.f_frsize
+        except Exception:
+            continue
+    return TOTAL * 100
+
+
 def _forced_snapshot(snap):
     """RADA_FAKE_MEMORY overrides fields of a snapshot, given as a JSON object.
 
@@ -148,7 +165,8 @@ def snapshot(reserve_frac=0.15, reserve_floor=1536 * 1024 ** 2):
         return _forced_snapshot(
             {"budget": TOTAL if forced is None else forced, "used": 0, "reserve": 0,
              "pressure": 1, "jetsam": 100, "swap_used": 0, "swap_total": 0,
-             "clamped": [], "unknown_platform": forced is None})
+             "swap_deep": False, "disk_free": TOTAL * 100, "clamped": [],
+             "unknown_platform": forced is None})
 
     sw = swap()
     lvl, pct = pressure(), jetsam_pct()
@@ -166,9 +184,19 @@ def snapshot(reserve_frac=0.15, reserve_floor=1536 * 1024 ** 2):
     if pct < 25:
         budget = 0
         clamped.append(f"kernel considers only {pct}% free, under the 25% floor")
-    if sw["total"] and sw["used"] / sw["total"] > 0.75:
+    # Swap is not a fixed pool, so a percentage of it is not a measure of anything.
+    # macOS makes swap files as it needs them, a gigabyte at a time, up to the free space
+    # on the disk: measured on this machine, two files created three days apart with 29 GB
+    # free beside them. The old test, swap more than three quarters full, therefore fired
+    # at 3.2 of 4.0 GiB on a machine that was working perfectly well, where it capped a
+    # budget it did not change and put "over 75% full" into the reason every waiting job
+    # was given. What does mean something is swap grown deep enough to rival the memory
+    # of the machine itself.
+    swap_deep = sw["used"] > TOTAL // 2
+    if swap_deep:
         budget = min(budget, TOTAL // 16)
-        clamped.append(f"swap {sw['used']/GiB:.1f} of {sw['total']/GiB:.1f} GiB, over 75% full")
+        clamped.append(f"swap {sw['used']/GiB:.1f} GiB deep, over half the memory "
+                       f"of this machine")
 
     forced = _forced_budget()
     if forced is not None:
@@ -179,7 +207,8 @@ def snapshot(reserve_frac=0.15, reserve_floor=1536 * 1024 ** 2):
         {"budget": budget, "used": used, "reserve": reserve, "wired": wired,
          "compressor": comp, "anon": anon, "filebacked": s.external_page_count * PAGE,
          "pressure": lvl, "jetsam": pct, "swap_used": sw["used"],
-         "swap_total": sw["total"], "clamped": clamped, "unknown_platform": False})
+         "swap_total": sw["total"], "swap_deep": swap_deep,
+         "disk_free": disk_free(), "clamped": clamped, "unknown_platform": False})
 
 
 def available():

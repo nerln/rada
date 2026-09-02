@@ -31,7 +31,8 @@ LOG = os.path.join(HOME, "rada.log")
 STALE = 20.0          # a lock older than this is presumed abandoned
 ACQUIRE_TIMEOUT = 15.0
 
-EMPTY = {"v": SCHEMA, "tickets": {}, "leases": {}, "judge": {}, "learn": {}, "reserve": {}}
+EMPTY = {"v": SCHEMA, "tickets": {}, "leases": {}, "judge": {}, "learn": {},
+         "reserve": {}, "alone": {}}
 
 
 def ensure_home():

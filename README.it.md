@@ -35,6 +35,9 @@ test che qualcuno sta aspettando da una reindicizzazione notturna, e l'ordine di
       ├─ hook PreToolUse ────────────────► sembra pesante? ── no ──► parte intatto
       │                                        │ sì
       │                                        ▼
+      │                                   c'è qualcun altro? ── no ──► parte intatto
+      │                                        │ sì
+      │                                        ▼
       │                                   salva il comando verbatim,
       │                                   riscrive la chiamata al wrapper
       ▼
@@ -43,6 +46,9 @@ test che qualcuno sta aspettando da una reindicizzazione notturna, e l'ordine di
       ▼
     il wrapper prende un biglietto ─────► coda ──► il giudice la ordina
       │                                        │
+      │                                        ▼
+      │                                   rada tiene qualcosa? ─ no ─► la testa passa
+      │                                        │ sì
       │                                        ▼
       │                                   c'è posto, ed è il tuo turno?
       ├─ no ──► aspetta, dicendo perché e chi tiene la memoria
@@ -188,10 +194,12 @@ rifiuterà. Quindi il budget è
 
     totale − riserva − (wired + compressore + anonima non compressa)
 
-con una riserva del 15 per cento o 1,5 GB, il maggiore dei due, e tre stop netti: pressione
-del kernel sopra il normale, stima di libero del kernel sotto il 25 per cento, e un tetto
-quando lo swap è pieno per più di tre quarti. Un job entra solo se la sua stima per 1,3 ci
-sta.
+con una riserva del 15 per cento o 1,5 GB, il maggiore dei due, e due stop netti più un tetto:
+pressione del kernel sopra il normale, stima di libero del kernel sotto il 25 per cento, e
+un tetto quando lo swap è cresciuto oltre metà della memoria della macchina. Un job entra solo se la
+sua stima ci sta con un margine: il trenta per cento in più se l'impronta l'ha imparata rada
+guardando, un decimo in più se il numero l'ha scritto una persona con `--need`, perché quel
+numero porta già il margine suo.
 
 La stima viene dal job stesso. rada campiona l'impronta fisica di tutto il gruppo di
 processi mentre gira e ricorda il picco, indicizzato su una firma del comando con i numeri
@@ -208,6 +216,74 @@ Quando invece drenare potrebbe bastare, rada prenota: smette di ammettere qualun
 mangerebbe la sua quota e lascia che la macchina si svuoti, facendo passare sotto solo i
 job brevi. Se dopo sette minuti la testa ancora non ci sta, molla la prenotazione con
 un'attesa crescente e intanto lascia lavorare gli altri.
+
+## Quando non tiene niente, rada si tira da parte
+
+Tutta quella aritmetica decide chi passa mentre rada tiene qualcosa. Quando non tiene
+niente, si tira da parte: il biglietto più vecchio parte, qualunque cosa dica il budget.
+
+Misurato su un portatile da 16 GB con la coda vuota: un job dichiarato a 4 GB è stato
+messo ad aspettare memoria tenuta da un browser, un lettore di musica e due editor, e
+rada aveva già stabilito che nessun job in coda gliela avrebbe mai restituita. L'ha
+scritto e ha aspettato lo stesso. Lo stesso comando con rada disinstallata sarebbe
+partito, e macOS avrebbe paginato: è quello che la paginazione serve a fare.
+
+Quindi senza nessun posto assegnato il biglietto più vecchio viene misurato su un altro
+numero e parte. Quel numero è quanto è libero adesso più un margine di paginazione, perché
+macOS pagina e un job che ha la macchina tutta per sé è esattamente il caso per cui la
+paginazione esiste. Alla stima viene applicato lo stesso margine che le applica il budget:
+il trenta per cento per un'impronta che rada ha imparato, il dieci per una scritta da una
+persona.
+
+La soglia si muove con la macchina, e due volte. Il residente la abbassa direttamente,
+quindi quello che ha preso l'ultimo job viene tolto a quello che può chiedere il prossimo.
+E il margine di paginazione, al massimo un quarto della macchina, non è mai più di quello
+che manca perché lo swap arrivi alla profondità che ferma la regola del tutto: così quel
+limite è una discesa e non un gradino da cui si cade. Con sette giga già paginati su un
+portatile da sedici, il margine è l'ultimo giga prima che mezza macchina sia su disco.
+
+Anche quello che uno di questi job ha promesso viene tenuto contro il successivo finché
+la sua memoria non si vede. Un posto assegnato avrebbe coperto la cosa, ed è proprio
+quello che manca: il wrapper esce insieme al figlio, e un job che si mette in background
+esce subito. Così sono passati cinque job dichiarati a dodici giga uno dietro l'altro,
+nessuno dei quali aveva ancora allocato niente.
+
+Per un pomeriggio la soglia è stata la dimensione della macchina, che non è una soglia. Su
+questo portatile, con tredici giga su sedici già residenti, faceva passare un job
+dichiarato a dodici: venticinque giga di richiesta su sedici di memoria. È saltato fuori
+eseguendola, non leggendola.
+
+Il più vecchio per arrivo fra quelli che potrebbero davvero partire, perché un job
+trattenuto o forzato a più tardi ha già la sua risposta altrove: contandolo fra i
+candidati, un solo biglietto trattenuto spegneva la regola per tutta la coda. E il più
+vecchio, non la testa della coda. Sulla testa cadono i tre punti del
+giudice, e saltare il budget è più potere di una prenotazione, che lo stesso file si
+rifiuta di dare a un modello che legge testo non controllato. Fra un'ammissione di questo
+tipo e la successiva passano cinque secondi, perché quello che un job prende ci mette un
+attimo ad arrivare nel numero su cui è disegnata la soglia: prima che quell'attesa
+esistesse, cinque job dichiarati a dodici giga sono passati nello stesso secondo, ognuno
+essendosi messo in background così che il suo posto finiva con la shell che lo aveva
+avviato.
+
+Quattro letture lo fermano ancora. Vengono tutte e quattro dal kernel, contro soglie che
+mette rada: la pressione di memoria al livello 4, il massimo che il kernel ha, e apposta non
+l'avviso di livello 2 che azzera il budget, perché sopravvivere a un avviso di routine è
+gran parte del punto; il misuratore del killer sotto il 25 per cento; e lo swap cresciuto
+oltre metà della memoria della macchina; e meno di cinque giga liberi sul disco da cui
+si fanno i file di swap, perché una paginazione che non ha dove andare non è una
+paginazione ma uno stallo, ed era l'unico numero sulla memoria che rada non leggeva.
+`rada status` dice in quale dei due stati sei,
+sotto le righe della memoria, e `RADA_ALONE=0` rimette il budget a decidere anche il caso
+singolo.
+
+Il limite sullo swap è stato riscritto nello stesso momento e per lo stesso motivo. macOS
+i file di swap se li crea quando servono, un giga alla volta, fino allo spazio libero sul
+disco: la vecchia prova, swap pieno per più di tre quarti, era un rapporto su un
+denominatore che il kernel ridimensiona. Su questa macchina scattava a 3,2 di 4,0 GiB
+mentre andava tutto bene, limitando un budget che non cambiava e infilando "over 75% full"
+nella motivazione data a ogni job in attesa. E il denominatore si è poi spostato, che è
+l'argomento in una osservazione sola: sulla stessa macchina il serbatoio è passato da 4,0
+a 8,0 GiB nel giro di un giorno.
 
 ## Installazione
 
@@ -336,7 +412,8 @@ ordinamento. rada lo dice invece di aspettare in silenzio: nomina i programmi ch
 la memoria, manda una notifica sulla scrivania, e stampa il comando che la scavalca.
 `rada force <id>` fa partire un job subito ignorando il budget, e
 `rada force <id> --after <altro>` mette in sequenza due job che insieme schianterebbero la
-macchina. Un job forzato è marcato come tale in `rada status`, perché i lemmi sull'equità
+macchina. Serve molto meno di prima, perché un job che arriva mentre rada non sta facendo girare
+niente non aspetta più nessuno. Un job forzato è marcato come tale in `rada status`, perché i lemmi sull'equità
 descrivono le decisioni che rada prende da sola e una forzatura umana sta fuori da quelle.
 
 Vale anche al contrario. `rada hold <id>` impedisce del tutto a un job di partire, e non
@@ -410,7 +487,7 @@ python3 tools/prova.py                 # la coda
 swift test --package-path macapp       # la finestra
 ```
 
-158 controlli, un paio di secondi, nessun modello caricato e nessuna memoria vera
+212 controlli, un paio di secondi, nessun modello caricato e nessuna memoria vera
 allocata. Coprono la riscrittura che non lascia sfuggire operatori di shell né newline,
 tutti e due i lemmi sull'equità inclusa una simulazione avversariale da quattrocento
 round, il recupero dei permessi dopo un crash, il lock sotto quattro processi che lo
@@ -420,7 +497,17 @@ come processo vero: che un lavoro che non ci sta venga rifiutato invece di resta
 dietro sé stesso per sempre, che ricontrollare un biglietto non prenda un secondo posto in
 fila, e che un posto venga restituito quando il server si ferma.
 
-Coprono anche il trattenimento: che un job trattenuto non parta nemmeno con tutto il
+Coprono anche il tirarsi da parte: che un job passi con niente in esecuzione e budget
+zero, che lo stesso job aspetti appena qualcosa gira, che la pressione al livello massimo,
+la soglia del killer, lo swap profondo e il disco pieno lo fermino ognuno per conto suo, che quattro giga
+passino su una macchina con tre liberi e dodici no, che gli stessi dodici passino a
+macchina vuota, che una seconda ammissione del genere aspetti un attimo che la memoria
+della prima si veda, che il giudice non possa scegliere chi salta il budget, che la testa
+di una coda ferma passi e quello dietro no, che un
+trattenimento e una forzatura ritardata vengano comunque prima, e che `RADA_ALONE=0`
+rimetta il comportamento vecchio.
+
+Coprono il trattenimento: che un job trattenuto non parta nemmeno con tutto il
 budget libero, che si faccia da parte invece di stare in testa alla coda, che non prenda
 prenotazioni e non faccia accodare nessuno dietro di sé, che rilasciarlo gli restituisca
 il posto che la sua anzianità merita, e che al giudice non vengano sottoposti job che
@@ -433,7 +520,16 @@ separato dalla coda viva, e che le dimensioni siano scritte esattamente come le 
 `rada/mem.py`, perché chi confronta la finestra con un terminale sta confrontando due
 numeri per una cosa sola.
 
-Due di quei test esistono perché hanno trovato difetti veri durante lo sviluppo: due job
+Una sezione esiste per tre difetti che la coda aveva da sempre, trovati mentre si allentava
+la regola del tirarsi da parte e corretti insieme a lei. Una testa che rinunciava alla
+prenotazione perché tutti gli altri avessero un turno se la riprendeva al giro dopo, tre
+secondi più tardi, perché svuotava la propria copia di lavoro e poi non trovava nessuna
+prenotazione; la stessa riga leggeva il conteggio dei fallimenti da quella copia svuotata,
+quindi l'attesa raddoppiante ripartiva ogni volta dal primo scalino; e la prenotazione era
+protetta dai job che si infilano sotto da un bisogno letto come zero quando mancava,
+invece che dalla stessa soglia che tutto il resto del file applica.
+
+Altri due test esistono perché hanno trovato difetti veri durante lo sviluppo: due job
 potevano essere ammessi insieme perché la decisione e il permesso stavano in transazioni
 diverse, e il lock poteva essere tenuto da due processi insieme perché si annunciava prima
 di dire chi lo possedeva.

@@ -11,6 +11,9 @@ struct Harbour: Decodable, Equatable {
     let now: Double
     let memory: Memory
     let sessions: String
+    /// What a job arriving right now would meet. On an empty queue it is the only thing
+    /// worth reading, and it is in none of the lists.
+    let standingAside: StandingAside
     let running: [Running]
     let waiting: [Waiting]
     /// Jobs whose process is no longer there. They are not part of the queue any more;
@@ -24,6 +27,7 @@ struct Harbour: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case rada, now, memory, sessions, running, waiting, judge, reservation, learned
         case leftBehind = "left_behind"
+        case standingAside = "standing_aside"
     }
 
     /// The jobs that start as soon as they ask, in queue order.
@@ -38,6 +42,14 @@ struct Harbour: Decodable, Equatable {
 
     /// Memory written down as promised to jobs that are not there any more.
     var strandedBytes: Int { leftBehind.reduce(0) { $0 + $1.holding } }
+}
+
+/// Whether rada is holding anything back at all.
+struct StandingAside: Decodable, Equatable {
+    /// True when rada is running nothing and the kernel is calm, which is when the next
+    /// job starts without asking the budget.
+    let on: Bool
+    let why: String
 }
 
 struct Memory: Decodable, Equatable {

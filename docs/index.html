@@ -304,7 +304,8 @@ footer a:hover { color: var(--text); }
     <h2>The machine had 2992 MB of its 4096 MB swap in use before anything visibly went wrong.</h2>
     <p class="lede lead-in">
       Then everything stopped responding for several minutes. Measured on 4 August 2026,
-      with 88000 pageouts: a PyTorch model in single precision, an Xcode build, a Unity
+      against a swap pool that has since doubled, which is part of why the clamp built on
+      that fraction was later replaced. With 88000 pageouts: a PyTorch model in single precision, an Xcode build, a Unity
       import and an ffmpeg pass, started within a minute of each other by four sessions
       that could not see one another.
     </p>
@@ -346,6 +347,9 @@ footer a:hover { color: var(--text); }
     the wrapper takes a ticket ─────────► queue ──► judge orders it
       │                                        │
       │                                        ▼
+      │                                   is rada running anything? ─ no ─► the head goes
+      │                                        │ yes
+      │                                        ▼
       │                                   is there room, and is it your turn?
       ├─ no ──► waits, printing why, and who is holding the memory
       └─ yes ─► runs the original command, measures what it really used</pre>
@@ -358,7 +362,9 @@ footer a:hover { color: var(--text); }
           Page cache counts as available and is not. The compressor holds real memory. On
           Apple Silicon a PyTorch allocation on the GPU lands in ordinary memory where
           nothing will refuse it. So the budget is the total, minus a reserve, minus wired
-          and compressor and uncompressed anonymous, with hard stops at kernel pressure.
+          and compressor and uncompressed anonymous, with hard stops at kernel pressure
+          above normal, at the killer's own gauge below 25 percent, and a cap when swap
+          grows past half the machine.
         </p>
       </div>
       <div class="card">
@@ -373,13 +379,65 @@ footer a:hover { color: var(--text); }
       </div>
       <div class="card">
         <span class="glyph">one session</span>
-        <h3>Alone on the machine, you pay nothing</h3>
+        <h3>The only session open, and the queue steps back</h3>
         <p>
           With nobody to coordinate with, a queue is only a wait before doing what the job
           was always free to do. The gate stands aside unless another session has run
           something recently, or a job is queued or running right now.
         </p>
       </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="narrow">
+      <p class="eyebrow">and when it should not count</p>
+      <h2>Carrying nothing, it stands aside.</h2>
+      <p class="lede lead-in">
+        All of that decides who goes while rada is carrying something. Carrying nothing,
+        it stands aside: the head of the queue starts whatever the budget says.
+      </p>
+      <p>
+        Measured on a 16 GB laptop with an empty queue: a job declared at 4 GB was told to
+        wait for memory held by a browser, a music player and two editors, and rada had
+        already worked out that no queued job was ever going to hand that memory back. It
+        printed exactly that, and waited anyway. The same command with rada uninstalled
+        would have started, and macOS would have paged for it, which is what paging is for.
+      </p>
+      <ul class="plain">
+        <li><strong>Against a bar that moves.</strong> Not the budget, and not the size
+          of the machine either: what is free right now plus an allowance of paging, with
+          the same margin the budget charges. As the resident set grows the bar shrinks,
+          and the allowance is never more than what is left before swap reaches the depth
+          that stops the rule outright. Drawn against the machine instead, for an
+          afternoon, it admitted a job declared at twelve gigabytes on a laptop with
+          thirteen of sixteen already resident, twenty-five gigabytes of demand on
+          sixteen gigabytes of memory.</li>
+        <li><strong>A promise is remembered.</strong> What one of these jobs asked for is
+          held against the next one until its memory shows up. A job that puts itself in
+          the background exits the wrapper that was watching it, and five jobs declared at
+          twelve gigabytes went through one after another that way, none of them having
+          allocated anything yet.</li>
+        <li><strong>The oldest, not the head.</strong> The head is where the judge's three
+          points land, and skipping the budget is more authority than a reservation, which
+          this queue refuses to hand to a model reading untrusted text. Five seconds
+          separate one such admission from the next, since what a job takes needs a moment
+          to show up in the number the bar is drawn against.</li>
+        <li><strong>The kernel still says no.</strong> Four readings, all of them the
+          kernel's own, against bars rada sets: pressure at level 4, the top the kernel has
+          and deliberately not the level-2 warning that zeroes the budget; the killer's own
+          gauge below 25 percent; swap past half the machine; and the free space on the
+          disk those swap files are made from, which is the real ceiling on how much
+          paging a machine can do and the one number rada never read.</li>
+        <li><strong>Swap is not a pool with a bottom.</strong> macOS makes swap files as it
+          needs them, a gigabyte at a time, up to the free space on the disk. The old test,
+          more than three quarters full, was a ratio against a denominator the kernel
+          resizes, and it fired at 3.2 of 4.0 GiB on a machine that was working perfectly
+          well. The denominator then moved: the pool on the same machine went from
+          4.0 to 8.0 GiB inside a day.</li>
+      </ul>
     </div>
   </div>
 </section>

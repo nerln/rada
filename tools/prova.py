@@ -404,6 +404,10 @@ try:
     stub_mem(2 * GB)
     sched.committed = lambda dd: 0
     d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    # A job of somebody else's is running, so this is the queue deciding rather than
+    # the machine standing empty.
+    d["leases"]["theirs"] = {"need": 1 * GB, "pid": os.getpid(), "pgid": None,
+                             "start": now - 30}
     mk(d, "toobig", age=100, need=9 * GB, now=now)
     mk(d, "little", age=1, need=200 * 1024 ** 2, now=now)
     r = sched.decide(d, "toobig", now)
@@ -564,6 +568,10 @@ mem.snapshot = lambda *a, **k: {"budget": 100, "used": 0, "reserve": 0, "pressur
                                 "clamped": [], "unknown_platform": False}
 try:
     d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    # Something of somebody else's is running. Forcing is for the contended machine:
+    # with nothing running rada stands aside and there is nothing to force past.
+    d["leases"]["theirs"] = {"need": 1 * GB, "pid": os.getpid(), "pgid": None,
+                             "start": now - 30}
     mk(d, "big", age=10, need=9 * GB, now=now)
     check("without a force it waits", not sched.decide(d, "big", now)["go"])
 
@@ -583,9 +591,13 @@ try:
     d["leases"].pop("other")
     r = sched.decide(d, "big", now)
     check("and goes once that job is gone", r["go"], str(r)[:120])
+    check("and it goes because it was forced, not because the machine emptied",
+          r.get("forced") is True, str(r)[:160])
 
     # the stuck flag is what triggers the notification
     d2 = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    d2["leases"]["theirs"] = {"need": 1 * GB, "pid": os.getpid(), "pgid": None,
+                              "start": now - 30}
     mk(d2, "hopeless", age=sched.STUCK_AFTER + 10, need=9 * GB, now=now)
     r = sched.decide(d2, "hopeless", now)
     check("a job stuck past the threshold is flagged for a person",
@@ -732,6 +744,352 @@ p3 = subprocess.run([sys.executable, RADA, "force", "deadbeef"], capture_output=
 check("and forcing a held job lifts the hold",
       "hold on it is lifted" in p3.stdout
       and not (store.read()["tickets"]["deadbeef"].get("hold")), p3.stdout[:160])
+
+
+# ------------------------------------------------------- 7d. a job with nobody to wait for
+
+section("7d. standing aside when rada is running nothing")
+
+fresh()
+GB = 1024 ** 3
+real_snapshot4 = mem.snapshot
+real_committed4 = sched.committed
+sched.committed = lambda dd: sum(l.get("need", 0) for l in dd["leases"].values())
+
+
+def machine(budget, pressure=1, jetsam=90, swap_deep=False, swap_used=0, wired=2 * GB,
+            used=0, disk_free=200 * GB):
+    mem.snapshot = lambda *a, **k: {"budget": budget, "used": used, "reserve": 0,
+                                    "disk_free": disk_free,
+                                    "pressure": pressure, "jetsam": jetsam,
+                                    "swap_used": swap_used, "swap_total": 4 * GB,
+                                    "swap_deep": swap_deep, "wired": wired, "clamped": [],
+                                    "unknown_platform": False}
+
+
+try:
+    # The reported case, measured on a 16GB laptop: an empty queue, a budget too small
+    # for the job, and the memory it wanted held by a browser and two editors.
+    machine(0)
+    d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d, "solo", age=1, need=4 * GB, now=now)
+    r = sched.decide(d, "solo", now)
+    check("with nothing running, a job goes even though the budget refuses it",
+          r["go"] and r.get("alone"), str(r)[:160])
+    check("and the reason says so rather than claiming it fitted",
+          "nobody to wait for" in r["why"] and "4.0GB" in r["why"], r["why"])
+
+    # The moment rada is carrying something, it is back to counting.
+    d["leases"]["theirs"] = {"need": 2 * GB, "pid": os.getpid(), "pgid": None,
+                             "start": now - 5}
+    check("with something running, the same job waits",
+          not sched.decide(d, "solo", now)["go"])
+    d["leases"].pop("theirs")
+
+    # What still stops it is the kernel, not the budget.
+    machine(0, pressure=4)
+    r = sched.decide(d, "solo", now)
+    check("critical kernel pressure stops it anyway", not r["go"], str(r)[:120])
+    check("and the wait says which reading stopped it",
+          "critical memory pressure" in str(r.get("facts", {}).get("alone_refused")),
+          str(r.get("facts"))[:200])
+
+    machine(0, jetsam=10)
+    check("the kernel's own free estimate under the floor stops it",
+          not sched.decide(d, "solo", now)["go"])
+
+    machine(0, swap_deep=True, swap_used=9 * GB)
+    check("swap already deeper than half the machine stops it",
+          not sched.decide(d, "solo", now)["go"])
+
+    # Paging needs somewhere to page to, and rada read every other number about memory
+    # before it read this one.
+    machine(0, disk_free=1 * GB)
+    r = sched.decide(d, "solo", now)
+    check("a disk with no room left for swap files stops it too", not r["go"])
+    check("and says which reading it was",
+          "left on the disk" in str(r.get("facts", {}).get("alone_refused")),
+          str(r.get("facts", {}).get("alone_refused"))[:120])
+
+    # And a job that would not fit even with every pageable byte paged out is refused
+    # rather than started, since standing aside cannot help it. The bar is the machine
+    # minus what the kernel has wired, not the machine.
+    # The bar is what is free plus a stated allowance of paging, so it moves with the
+    # machine. This is the state the laptop was actually in: thirteen of sixteen
+    # gigabytes resident and a budget of nothing.
+    machine(0, used=13 * GB)
+    d2 = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    bar = sched.alone_bar(mem.snapshot())
+    check("the bar is what is free plus the paging allowance",
+          bar == (mem.TOTAL - 13 * GB) + mem.TOTAL // 4, mem.human(bar))
+
+    # The allowance shrinks as swap approaches the depth that stops the rule outright,
+    # so that stop is a slope and not a cliff.
+    machine(0, used=13 * GB, swap_used=mem.TOTAL // 2 - 512 * 1024 ** 2)
+    narrow = sched.alone_bar(mem.snapshot())
+    check("with swap nearly deep the allowance is what is left before it is",
+          narrow == (mem.TOTAL - 13 * GB) + 512 * 1024 ** 2, mem.human(narrow))
+    machine(0, used=13 * GB)
+    mk(d2, "big", age=1, need=4 * GB, now=now)
+    check("a four gigabyte job goes on a machine with three free",
+          sched.decide(d2, "big", now)["go"])
+    d2["tickets"]["big"]["need"] = 12 * GB
+    r = sched.decide(d2, "big", now)
+    check("but twelve does not, since that is the machine twice over",
+          not r["go"], str(r)[:140])
+    check("and the refusal says what could be found instead of blaming the queue",
+          "only" in str(r.get("facts", {}).get("alone_refused", "")),
+          str(r.get("facts", {}).get("alone_refused"))[:160])
+
+    # The same job on an empty machine is fine, which is the point of the bar moving.
+    machine(0, used=2 * GB)
+    check("the same twelve gigabytes goes when the machine is empty",
+          sched.decide(d2, "big", now)["go"])
+
+    # A second admission that ignores the budget waits a moment, because what the first
+    # job takes needs a moment to show up in the number the bar is drawn against. Five
+    # jobs declared at twelve gigabytes were admitted in the same second without this.
+    machine(0, used=2 * GB)
+    d5 = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d5, "first", age=1, need=4 * GB, now=now)
+    check("the first one goes", sched.decide(d5, "first", now)["go"])
+    sched.grant(d5, "first", os.getpid(), None, now=now, alone=True)
+    check("and the grant records that the budget was not asked",
+          (d5.get("alone") or {}).get("first", {}).get("at") == now, str(d5.get("alone")))
+    d5["leases"].clear()          # the job backgrounded itself and its wrapper exited
+    mk(d5, "second", age=1, need=4 * GB, now=now)
+    r = sched.decide(d5, "second", now + 1)
+    check("a second one a second later does not also skip the budget", not r["go"],
+          str(r)[:140])
+    check("and what the first one promised is held against the bar until it appears",
+          sched.outstanding_alone(d5, mem.snapshot(), now + 6) == 4 * GB,
+          mem.human(sched.outstanding_alone(d5, mem.snapshot(), now + 6)))
+    check("and it says it is waiting to see what the first one takes",
+          "waits to see" in str(r.get("facts", {}).get("alone_refused", "")),
+          str(r.get("facts", {}).get("alone_refused"))[:140])
+    check("while a moment later it goes",
+          sched.decide(d5, "second", now + sched.ALONE_GAP + 1)["go"])
+
+    # The one the wall clock alone did not cover: a job that promised twelve gigabytes
+    # and has not touched them yet must not be followed by another twelve, however long
+    # anybody waits, until either the memory appears or the promise is forgotten.
+    machine(0, used=2 * GB)
+    d7 = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d7, "huge", age=1, need=12 * GB, now=now)
+    check("twelve gigabytes goes on an empty machine",
+          sched.decide(d7, "huge", now)["go"])
+    sched.grant(d7, "huge", os.getpid(), None, now=now, alone=True)
+    d7["leases"].clear()
+    mk(d7, "huge2", age=1, need=12 * GB, now=now)
+    check("a second twelve does not, even long after the wait is over",
+          not sched.decide(d7, "huge2", now + 60)["go"])
+    check("and it does once the promise is old enough to be forgotten",
+          sched.decide(d7, "huge2", now + sched.ALONE_WATCH + 1)["go"])
+
+    # Three in a row, which a single remembered promise did not bound: the third was
+    # measured against a bar that had forgotten the first.
+    machine(0, used=2 * GB)
+    d9 = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    for i, name in enumerate(("one", "two", "three")):
+        mk(d9, name, age=1, need=6 * GB, now=now)
+        went = sched.decide(d9, name, now + i * (sched.ALONE_GAP + 1))["go"]
+        if went:
+            sched.grant(d9, name, os.getpid(), None,
+                        now=now + i * (sched.ALONE_GAP + 1), alone=True)
+            d9["leases"].clear()
+        if i == 2:
+            check("the third six gigabyte job in a row is refused, not just the second",
+                  not went, f"promises: {list((d9.get('alone') or {}))}")
+    check("and all the promises that have not appeared are still counted",
+          sched.outstanding_alone(d9, mem.snapshot(), now + 12) == 12 * GB,
+          mem.human(sched.outstanding_alone(d9, mem.snapshot(), now + 12)))
+
+    # The margin the budget charges is charged here too.
+    machine(0, used=13 * GB)
+    d8 = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    bar8 = sched.alone_bar(mem.snapshot())
+    mk(d8, "edge", age=1, need=int(bar8 / 1.2), now=now)
+    check("a learned estimate just under the bar still needs its thirty percent",
+          not sched.decide(d8, "edge", now)["go"],
+          f"{mem.human(int(bar8 / 1.2))} against {mem.human(bar8)}")
+    d8["tickets"]["edge"]["declared"] = True
+    check("while the same number declared by a person needs only ten",
+          sched.decide(d8, "edge", now)["go"])
+
+    # A job somebody stopped must not stop everybody else. It is answered by its own
+    # branch long before this one, so if it also counted as the oldest, nothing in the
+    # queue could ever be the oldest.
+    machine(0, used=2 * GB)
+    dh = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(dh, "held_old", age=1000, need=4 * GB, now=now)
+    mk(dh, "newer", age=5, need=4 * GB, now=now)
+    dh["tickets"]["held_old"]["hold"] = {"since": now, "note": "not yet"}
+    check("a held job is not the oldest for this purpose",
+          sched.oldest(dh, now) == "newer", str(sched.oldest(dh, now)))
+    check("so the job behind it still goes on an empty machine",
+          sched.decide(dh, "newer", now).get("alone") is True)
+    dh["tickets"]["held_old"].pop("hold")
+    dh["tickets"]["held_old"]["force"] = {"at": now + 3600}
+    check("and a force set for later does not block it either",
+          sched.decide(dh, "newer", now).get("alone") is True)
+
+    # The judge must not be the one who picks who skips the budget. It moves the head,
+    # so the job that skips it is the oldest by arrival instead.
+    machine(0, used=2 * GB)
+    d6 = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    # Inside the ninety second overtaking window, or lemma 1 would settle it first.
+    mk(d6, "older", age=60, need=4 * GB, now=now)
+    mk(d6, "newer", age=5, need=4 * GB, now=now)
+    d6["judge"] = {"ts": now, "order": ["newer", "older"], "why": "test"}
+    check("the judge can put the newcomer at the head",
+          sched.order(d6, now)[0] == "newer")
+    check("but the one that skips the budget is the older",
+          sched.decide(d6, "older", now).get("alone") is True)
+    check("and not the one the judge promoted",
+          not sched.decide(d6, "newer", now).get("alone"))
+
+    # The window and the terminal ask the scheduler rather than working it out again.
+    machine(0)
+    d4 = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d4, "lone", age=1, need=1 * GB, now=now)
+    on, why = sched.stands_aside(d4, mem.snapshot())
+    check("the sentence the views print says rada is standing aside", on, why)
+    check("and it agrees with what the scheduler then does",
+          on == bool(sched.decide(d4, "lone", now)["go"]))
+    os.environ["RADA_ALONE"] = "0"
+    try:
+        on, why = sched.stands_aside(d4, mem.snapshot())
+        check("with the rule switched off the views say so instead of promising a start",
+              not on and "RADA_ALONE" in why, why)
+        check("and they still agree with the scheduler",
+              on == bool(sched.decide(d4, "lone", now)["go"]))
+    finally:
+        os.environ.pop("RADA_ALONE")
+    d4["leases"]["one"] = {"need": 1, "pid": os.getpid(), "pgid": None, "start": now}
+    on, why = sched.stands_aside(d4, mem.snapshot())
+    check("and with something running they say the budget decides",
+          not on and "budget decides" in why, why)
+
+    # Two jobs arriving together on an idle machine: one goes, the other waits for it.
+    # Refusing both would be the same complaint twice.
+    machine(0)
+    d3 = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    mk(d3, "first", age=100, need=4 * GB, now=now)
+    mk(d3, "second", age=10, need=4 * GB, now=now)
+    steps = dict(sched.plan(d3, now))
+    check("the head of an idle queue goes", steps["first"]["go"], str(steps["first"])[:120])
+    check("and the one behind it does not", not steps["second"]["go"],
+          str(steps["second"])[:120])
+
+    # The two human overrides still come first.
+    d3["tickets"]["first"]["hold"] = {"since": now, "note": "not yet"}
+    check("a held job does not start just because the machine is empty",
+          not sched.decide(d3, "first", now)["go"])
+    d3["tickets"]["first"].pop("hold")
+    d3["tickets"]["first"]["force"] = {"at": now + 60}
+    r = sched.decide(d3, "first", now)
+    check("a force with a delay still waits for the delay",
+          not r["go"] and r.get("forced"), str(r)[:120])
+    d3["tickets"]["first"].pop("force")
+
+    # And the switch that puts the old behaviour back.
+    os.environ["RADA_ALONE"] = "0"
+    try:
+        check("RADA_ALONE=0 restores the budget as the only answer",
+              not sched.decide(d3, "first", now)["go"])
+    finally:
+        os.environ.pop("RADA_ALONE")
+finally:
+    mem.snapshot = real_snapshot4
+    sched.committed = real_committed4
+
+
+# ------------------------------------------------- 7e. the cooldown that did not cool
+
+section("7e. giving up a reservation actually gives it up")
+
+fresh()
+real_snapshot5 = mem.snapshot
+real_committed5 = sched.committed
+try:
+    # A head that has been reserving for longer than RESERVE_MAX gives up for a while so
+    # that everybody else gets a turn. The giving up used to last one poll: the head
+    # emptied its own working copy of the reservation, found no reservation, and took a
+    # fresh one three seconds later with the failure count back at zero.
+    mem.snapshot = lambda *a, **k: {"budget": 2 * GB, "used": 0, "reserve": 0,
+                                    "pressure": 1, "jetsam": 90, "swap_used": 0,
+                                    "swap_total": 0, "swap_deep": False, "clamped": [],
+                                    "unknown_platform": False}
+    sched.committed = lambda dd: 6 * GB if dd["leases"] else 0
+    d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    d["leases"]["running"] = {"need": 6 * GB, "pid": os.getpid(), "pgid": None,
+                              "start": now - 10}
+    mk(d, "head", age=1000, need=5 * GB, now=now)
+    mk(d, "behind", age=10, need=1 * GB, now=now)
+
+    sched.decide(d, "head", now)
+    check("the head takes a reservation", (d.get("reserve") or {}).get("id") == "head",
+          str(d.get("reserve")))
+    d["reserve"]["since"] = now - sched.RESERVE_MAX - 1
+    r = sched.decide(d, "head", now)
+    check("and gives it up once it has held the machine too long",
+          r.get("defer") and d["reserve"].get("id") is None, str(d.get("reserve")))
+    cool_until = d["reserve"]["until"]
+
+    r = sched.decide(d, "head", now + 3)
+    check("three seconds later it does not simply take it again",
+          (d.get("reserve") or {}).get("id") is None, str(d.get("reserve")))
+    check("and it says how long the machine is not being held for it",
+          "not being held open" in r["why"], r["why"])
+    check("the cooldown it promised is still the one it promised",
+          d["reserve"].get("until") == cool_until, str(d.get("reserve")))
+
+    # Second failure doubles the wait. Reading the count out of the emptied copy made
+    # every backoff the first one.
+    d["reserve"] = {"id": "head", "since": now - sched.RESERVE_MAX - 1, "fails": 1}
+    sched.decide(d, "head", now)
+    check("a second failure waits twice as long as the first",
+          d["reserve"]["fails"] == 2
+          and d["reserve"]["until"] - now == sched.RESERVE_BACKOFF * 2,
+          str(d.get("reserve")))
+
+    # A cooldown is a promise to everybody else, and the head reaching impossible_for_now
+    # used to throw it away on its way past.
+    d["reserve"] = {"id": None, "until": now + 120, "fails": 2, "blame": "head"}
+    d["tickets"]["head"]["need"] = 400 * GB
+    r = sched.decide(d, "head", now)
+    check("a head that cannot fit at all does not wipe the cooldown on its way out",
+          d["reserve"].get("until") == now + 120 and d["reserve"].get("fails") == 2,
+          str(d.get("reserve")))
+    d["tickets"]["head"]["need"] = 5 * GB
+
+    # And the punishment belongs to whoever earned it.
+    d["reserve"] = {"id": None, "until": now - 1, "fails": 4, "blame": "someone-else"}
+    sched.decide(d, "head", now)
+    check("a new head does not serve out somebody else's failure count",
+          (d.get("reserve") or {}).get("fails") == 0, str(d.get("reserve")))
+
+    # A reserving ticket whose need was never written is protected by the same floor
+    # decide charges it, not by nothing.
+    d = dict(store.EMPTY, tickets={}, leases={}, judge={}, learn={}, reserve={})
+    d["leases"]["running"] = {"need": 6 * GB, "pid": os.getpid(), "pgid": None,
+                              "start": now - 10}
+    mk(d, "noneed", age=1000, need=0, now=now)
+    mk(d, "small", age=10, need=300 * 1024 ** 2, now=now)
+    d["reserve"] = {"id": "noneed", "since": now, "fails": 0}
+    d["learn"] = {"small": {"dur_p95": 5.0, "p95": 300 * 1024 ** 2, "n": 3,
+                            "max": 300 * 1024 ** 2}}
+    mem.snapshot = lambda *a, **k: {"budget": 600 * 1024 ** 2, "used": 0, "reserve": 0,
+                                    "pressure": 1, "jetsam": 90, "swap_used": 0,
+                                    "swap_total": 0, "swap_deep": False, "clamped": [],
+                                    "unknown_platform": False}
+    sched.committed = lambda dd: 0
+    r = sched.decide(d, "small", now)
+    check("a backfiller cannot eat the share held for a ticket with no declared need",
+          not r["go"], str(r)[:160])
+finally:
+    mem.snapshot = real_snapshot5
+    sched.committed = real_committed5
 
 
 # ------------------------------------------------------- 8. real contention, real processes

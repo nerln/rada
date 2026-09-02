@@ -14,6 +14,7 @@ final class QueueTests: XCTestCase {
                "pressure":1,"jetsam":61,"swap_used":429496729,"swap_total":6442450944,
                "clamped":[],"unknown_platform":false},
      "sessions":"3 sessions open, so the queue is on",
+     "standing_aside":{"on":false,"why":"one job is running, so the budget decides the next one"},
      "running":[{"id":"a41f9c02","project":"aidirector","command":"ffmpeg -i a.mov out.mp4",
                  "need":2147483648,"peak":1932735283,"started_at":786.0,"seconds":214.0,
                  "pid":4242}],
@@ -135,6 +136,7 @@ final class QueueTests: XCTestCase {
                    "pressure":1,"jetsam":90,"swap_used":0,"swap_total":0,"clamped":[],
                    "unknown_platform":false},
          "sessions":"one session on its own, so commands do not go through the queue",
+         "standing_aside":{"on":true,"why":"nothing is running under rada, so the next job starts straight away"},
          "running":[],"waiting":[],"left_behind":[],
          "judge":{"at":0,"age":null,"order":[],"why":""},
          "reservation":{"id":null,"since":null,"cooldown_until":null,"fails":0},
@@ -142,6 +144,7 @@ final class QueueTests: XCTestCase {
         """
         let harbour = try JSONDecoder().decode(Harbour.self, from: Data(empty.utf8))
         XCTAssertTrue(harbour.waiting.isEmpty)
+        XCTAssertTrue(harbour.standingAside.on)
         XCTAssertFalse(harbour.judge.hasVerdict)
         XCTAssertNil(harbour.reservation.id)
     }

@@ -213,7 +213,7 @@ def _decide(tid):
         d = sched.decide(st.d, tid)
         facts = d.get("facts") or {}
         if d.get("go"):
-            sched.grant(st.d, tid, os.getpid(), None)
+            sched.grant(st.d, tid, os.getpid(), None, alone=bool(d.get("alone")))
             MINE.add(tid)
             return {"answer": "go", "ticket": tid, "why": d.get("why", "admitted"),
                     "release_with": f"rada_release ticket={tid}"}

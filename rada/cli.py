@@ -165,7 +165,8 @@ class Waiter:
                     # window in which two waiters are both told to go, which is the one
                     # race that makes the whole tool pointless. The process id is our
                     # own until the child exists; the group id is filled in by start().
-                    sched.grant(st.d, self.tid, os.getpid(), None)
+                    sched.grant(st.d, self.tid, os.getpid(), None,
+                                alone=bool(d.get("alone")))
                     self.granted = True
                     return d.get("why", "admitted")
                 if not judged and judge.duty(st.d, self.tid):
@@ -462,6 +463,12 @@ def picture(d, now=None):
             "pid": ls.get("pid"),
         })
 
+    # What a job arriving right now would meet. It is the first thing somebody looking at
+    # an empty queue wants to know, and no list on the screen answers it. The sentence is
+    # sched.py's, like every other sentence here.
+    on, why = sched.stands_aside(d, snap)
+    aside = {"on": on, "why": why}
+
     res = d.get("reserve") or {}
     j = d.get("judge") or {}
     try:
@@ -482,6 +489,7 @@ def picture(d, now=None):
                    "clamped": snap.get("clamped", []),
                    "unknown_platform": bool(snap.get("unknown_platform"))},
         "sessions": where,
+        "standing_aside": aside,
         "running": running,
         "waiting": waiting,
         "left_behind": left,
@@ -526,6 +534,9 @@ def cmd_status(args):
         print(f"  {sessions.describe()}")
     except Exception:
         pass
+    # Printed in both states. Saying it only when rada is standing aside means the
+    # terminal can never tell you that it is not.
+    print(f"  {sched.stands_aside(d, snap)[1]}")
 
     if d["leases"]:
         print("\nrunning")

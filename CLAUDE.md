@@ -51,7 +51,29 @@ Queste sono il progetto. Tutto il resto è dettaglio.
    prima con la loro memoria ancora contata contro il budget. `cli.swept()` fa la pulizia
    su una copia, le due viste prendono i numeri da lì, e quello che la pulizia toglierebbe
    viene riportato a parte come `left_behind`. A scrivere davvero è solo `rada reap`.
-9. **Con una sessione sola il gate si tira da parte.** Decide `rada/sessions.py`, e il
+9. **Quando rada non tiene niente, si tira da parte.** (Da non confondere con la 10:
+   quella guarda se c'è un'altra sessione, questa se rada tiene un posto assegnato.) Con
+   `d["leases"]` vuoto il biglietto **più vecchio per arrivo** (non la testa: sulla testa
+   cadono i punti del giudice, e questo potere è più di una prenotazione) viene misurato
+   su `sched.alone_bar` (`sched.oldest` salta i trattenuti e i forzati a più tardi, o uno
+   solo di loro spegne la regola per tutta la coda), cioè quanto è libero più `TOTAL // ALONE_SWAP` di paginazione,
+   invece che sul budget. A fermarlo restano quattro letture del kernel: pressione al
+   livello massimo, la percentuale del killer sotto la soglia, swap oltre metà della
+   memoria della macchina, e meno di `DISK_FLOOR` liberi sul disco da cui si fanno i file
+   di swap (`sched.kernel_says_stop`). La soglia deve muoversi con `used`: per un
+   pomeriggio è stata `TOTAL - wired`, e su questa macchina faceva passare 12 GB con 13 GB
+   già residenti. `ALONE_GAP` separa due ammissioni di questo tipo, e
+   `outstanding_alone` tiene quello che il job precedente ha promesso contro la soglia
+   finché non compare in `used` o finché non passa `ALONE_WATCH`: aspettare qualche
+   secondo non basta, un checkpoint ci mette di più ad arrivare nel residente. Il motivo della regola è misurato: su
+   questo portatile, coda vuota, un job dichiarato a 4 GB aspettava memoria tenuta da
+   browser ed editor, e rada aveva già stabilito che nessun job in coda gliela avrebbe
+   restituita. A limitarla a un job per volta è `not d["leases"]`, che vale solo perché la
+   decisione e il permesso stanno nella stessa transazione (invariante 4): appena il posto
+   è assegnato, la regola si spegne per tutti gli altri. Se aggiungi un terzo punto di
+   ammissione, deve concedere dentro la transazione in cui decide, o questa regola salta.
+   `RADA_ALONE=0` la disattiva.
+10. **Con una sessione sola il gate si tira da parte.** Decide `rada/sessions.py`, e il
    gate lo interroga prima di riscrivere. Le condizioni per accodare sono due, in or:
    un'altra sessione ha toccato il gate dentro `WINDOW`, oppure esiste un lease o un
    biglietto. La seconda non è ridondante: una sessione che ha avviato un lavoro lungo e
@@ -94,7 +116,7 @@ rada/setup_claude.py  install, uninstall, doctor
 macapp/            la finestra: SwiftUI, macOS 14+, nessuna dipendenza, niente .xcodeproj
 rada/mcp.py        ask, queue, release come tool MCP: ammissione senza esecuzione
 bin/rada-mcp       il server MCP, lo lancia Claude Code
-tools/prova.py     158 controlli, un paio di secondi, nessun modello caricato
+tools/prova.py     212 controlli, un paio di secondi, nessun modello caricato
 tools/schermate.py rigenera le immagini a terminale del README da output vero
 tools/schermate-app.sh  fotografa la finestra sulla stessa coda inventata
 tools/prova-giudice.py  prova viva di resistenza all'iniezione, chiama il modello
@@ -154,6 +176,12 @@ codice spiegano **perché**, non cosa.
   reti sotto sono lo spegnimento del server, che restituisce quello che teneva, e
   `sched.reap`, che libera tutto quando quel pid non c'è più. Una scadenza sul posto
   sarebbe una regola di scheduling nuova, e quelle stanno in `sched.py` o non stanno.
+- **Le prenotazioni avevano tre difetti**, trovati il 02/09/2026 e corretti insieme alla
+  regola 9: la testa che rinunciava si riprendeva la prenotazione al giro dopo (tre
+  secondi invece di due minuti), il conteggio dei fallimenti veniva letto dalla copia
+  svuotata e quindi l'attesa non raddoppiava mai, e `head_need` era letto come 0 invece
+  che con la soglia `DEFAULT_NEED`, così chi si infila sotto poteva mangiare la quota
+  tenuta. Sezione 7e di `tools/prova.py`. Se tocchi quel ramo, quei test sono la rete.
 - **Il sito sta in `docs/`** e lo serve GitHub Pages da `master`. `docs/brand.md` tiene
   il marchio e i colori; `docs/img/mark.svg` e `macapp/Tools/make-icon.swift` sono lo
   stesso disegno in due linguaggi e vanno cambiati insieme.

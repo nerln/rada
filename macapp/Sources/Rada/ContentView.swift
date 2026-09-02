@@ -82,6 +82,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             if let harbour = store.harbour {
                 HarbourBar(memory: harbour.memory, sessions: harbour.sessions,
+                           aside: harbour.standingAside,
                            reservation: harbour.reservation, now: harbour.now)
             }
             if let harbour = store.harbour, !harbour.leftBehind.isEmpty {
