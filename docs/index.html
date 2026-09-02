@@ -10,6 +10,7 @@
 <meta property="og:image" content="https://nerln.github.io/rada/img/01-queue.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
+<link rel="canonical" href="https://nerln.github.io/rada/">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230B1013'/><rect x='45' y='15' width='6' height='34' rx='3' fill='%23E9EFEF'/><circle cx='34' cy='32' r='5.5' fill='%234FBE8F'/><circle cx='19' cy='32' r='5.5' fill='%23E9EFEF' opacity='0.42'/></svg>">
 
 <style>
@@ -653,6 +654,8 @@ open Rada.app</pre>
         <li>It does not gate work that never becomes a Bash command. An MCP tool that
           builds an Xcode project inside its own server is invisible to a hook on Bash; an
           agent can ask for a berth with <code>rada_ask</code>, but nothing forces it to.</li>
+        <li>It does not know what a job needs before it has seen it once. The first run
+          of anything is assumed to need 512 MB unless you say otherwise.</li>
         <li>It does not send anything anywhere. The judge runs locally on a prompt
           containing project names and command lines. If that is too much for your
           repository, <code>rada mode advise</code> and no model is ever called.</li>
