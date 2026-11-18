@@ -189,7 +189,8 @@ class Waiter:
                 notify("rada: a job is stuck",
                        f"{self.tid} has waited {int(now - t0) // 60} min and needs "
                        f"{mem.human(self.need)} the machine cannot free. "
-                       f"Run: rada force {self.tid}")
+                       f"Run: rada force {self.tid}",
+                       ticket=self.tid)
                 self._say(f"this job cannot fit while other programs hold the memory.")
                 self._say(f"    to start it anyway:  rada force {self.tid}")
                 for b in (f.get("blockers") or [])[:3]:
@@ -461,6 +462,7 @@ def picture(d, now=None):
             "started_at": ls.get("start", now),
             "seconds": now - ls.get("start", now),
             "pid": ls.get("pid"),
+            "session": ls.get("sid", ""),
         })
 
     # What a job arriving right now would meet. It is the first thing somebody looking at
@@ -629,18 +631,110 @@ def cmd_reset(args):
     return 0
 
 
-def notify(title, body, url=None):
+RADA_APP = "/Applications/Rada.app"
+
+# One notice at most this often for the whole machine, whichever session sends it. Six
+# sessions with a job stuck each used to mean six banners and six launches of Rada.app in
+# the same minute, because each waiter decided on its own. The banner the app posts says
+# how many others cannot fit, and the queue says the rest.
+NOTICE_EVERY = 600
+
+
+def _claim_notice(now):
+    """True for the one waiter that gets to speak in this stretch of NOTICE_EVERY seconds.
+
+    Taken under the queue's own lock, so two sessions finding their jobs stuck in the same
+    second cannot both conclude they are first.
+    """
+    with store.Transaction() as st:
+        if not st.ok:
+            return False
+        last = float(st.d.get("noticed") or 0)
+        if now - last < NOTICE_EVERY:
+            return False
+        st.d["noticed"] = now
+        return True
+
+
+def _app_can_post():
+    """Whether handing Rada.app a notice can end in a banner.
+
+    The app writes `app.json` in rada's home each time it learns what macOS allows it. Until
+    it says granted or provisional, launching it for a notice does nothing useful: it starts,
+    reads the refusal, and leaves, which on a machine with notifications turned off for Rada
+    was the only thing every stuck job achieved. And before the fix of 18/11 it did not even
+    leave. Missing or unreadable means not yet: the app has never been opened by a person,
+    which is when it asks.
+    """
+    if not os.path.isdir(RADA_APP):
+        return False
+    try:
+        with open(os.path.join(store.HOME, "app.json")) as f:
+            return json.load(f).get("notices") in ("granted", "provisional")
+    except Exception:
+        return False
+
+
+def notify(title, body, ticket=None):
     """Tell the person, through the desktop, once.
 
     A queued job that cannot fit is invisible: it is a background process printing to a
     log nobody is reading. Waiting silently for an hour is the worst behaviour available,
     because the one thing that would fix it, closing an editor or saying go anyway, is
     something only a person can do and only if they know.
+
+    Two ways of saying it, and the first one is better for a reason that took a while to
+    notice. `osascript display notification` has no identity: the banner is headed
+    "Script Editor", clicking it opens Script Editor, and it can carry no buttons, so the
+    most it could say was a sentence ending in "run: rada force 8f3a". When Rada.app is
+    installed the banner is the app's own, with a button that starts the job and a button
+    that opens the queue.
+
+    The app is handed the ticket and nothing else, through a url it then checks against
+    the real queue. Not a command: a url scheme is openable by any page in any browser.
+
+    `open -g` so the app does not come forward and does not take the keyboard, and it
+    reaches an app that is already running as well as launching one that is not.
+
+    Once per NOTICE_EVERY for the whole machine, and the app only when it can post: see
+    `_claim_notice` and `_app_can_post`. The waiter still says it on its own output every
+    time, so the session that owns the job always knows.
     """
+    now = time.time()
     try:
+        if not _claim_notice(now):
+            return
+    except Exception:
+        # A notice is a courtesy. A disk that cannot take the stamp must not end the job
+        # that has been waiting longest.
+        return
+    via = "osascript"
+    try:
+        if ticket and _app_can_post():
+            argv = ["open", "-g"]
+            if os.environ.get("RADA_HOME"):
+                # A queue somewhere else than ~/.rada, which is what the tests use. The
+                # app reads the same variable, and `open` does not pass the environment.
+                argv += ["--env", f"RADA_HOME={store.HOME}"]
+            r = subprocess.run(argv + ["-a", RADA_APP, f"rada://stuck/{ticket}"],
+                               capture_output=True, timeout=5)
+            if r.returncode == 0:
+                store.log(f"notice for {ticket} handed to Rada.app")
+                return
+            via = "osascript, Rada.app would not open"
+    except Exception:
+        pass
+    store.log(f"notice for {ticket or '-'} via {via}")
+    try:
+        # The title and the body go in as arguments. Pasted into the source of the
+        # script they would be one quote away from being read as AppleScript, and the
+        # body of this one carries a command line somebody else wrote.
         subprocess.run(
             ["osascript", "-e",
-             f'display notification {json.dumps(body)} with title {json.dumps(title)}'],
+             "on run argv\n"
+             "display notification (item 2 of argv) with title (item 1 of argv)\n"
+             "end run",
+             title, body],
             capture_output=True, timeout=5)
     except Exception:
         pass

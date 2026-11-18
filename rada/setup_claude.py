@@ -124,6 +124,47 @@ def _backup(path):
     return None
 
 
+def reached_through(s):
+    """Another registered hook that calls rada-gate itself, or None.
+
+    rada does not have to be registered to be running. On the machine this was written
+    on it is called by `~/.claude/hooks/no-cd-persist.py`, a hook that exists to stop a
+    `cd` from moving the session for the rest of it, and which took over calling rada-gate
+    deliberately: two hooks that both rewrite the same command tread on each other, and an
+    earlier version of that file which stepped aside for rada's heavy patterns let a
+    command through unwrapped because rada answers `{}` when a job may start at once.
+
+    So being reached through somebody else is a correct installation, not a broken one,
+    and `doctor` used to call it "not registered, run rada install" while the gate was
+    working perfectly. Running that install would have been the real fault: the command
+    would then be ticketed twice.
+
+    Found by reading the registered commands rather than by guessing at names: a hook that
+    mentions rada-gate anywhere in its text is calling it.
+    """
+    for group in (s.get("hooks") or {}).get("PreToolUse", []) or []:
+        for hook in group.get("hooks", []) or []:
+            command = str(hook.get("command", ""))
+            if command.endswith("rada-gate"):
+                continue
+            # Every word of the command line that names a readable file, because a hook
+            # is registered as often as `/usr/bin/python3 /path/to/hook.py` as it is as a
+            # bare path, and reading only the first word found the interpreter.
+            for word in command.split():
+                path = os.path.expanduser(word.strip("'\""))
+                if not path.startswith("/") or not os.path.isfile(path):
+                    continue
+                try:
+                    if os.path.getsize(path) > 2 * 1024 ** 2:
+                        continue
+                    with open(path, errors="replace") as f:
+                        if "rada-gate" in f.read():
+                            return path
+                except OSError:
+                    continue
+    return None
+
+
 def _load_settings():
     try:
         with open(SETTINGS) as f:
@@ -160,6 +201,20 @@ def install():
     if s is None:
         out.append(f"  ! {SETTINGS} is not valid JSON; not touching it")
         return out
+    # Somebody else may already be calling the gate. Registering it again would have a
+    # heavy command ticketed twice, once by each hook, which is the one failure the other
+    # hook's own header warns about.
+    through = reached_through(s)
+    if through:
+        out.append(f"  rada-gate is already called by {through}")
+        out.append("  leaving settings.json alone: registering it again would ticket a")
+        out.append("  heavy command twice, once through each hook. `rada doctor` reports")
+        out.append("  this as a correct installation. To register it here instead, take")
+        out.append("  the call out of that file first.")
+        return out
+
+    # Backed up only now that something is actually going to be written. Taking the copy
+    # first left a backup behind on every install that then decided to touch nothing.
     b = _backup(SETTINGS)
     if b:
         out.append(f"  backed up settings to {os.path.basename(b)}")
@@ -239,9 +294,15 @@ def doctor():
         hooked = any(str(h.get("command", "")).endswith("rada-gate")
                      for g in (s.get("hooks") or {}).get("PreToolUse", [])
                      for h in g.get("hooks", []))
-        out.append(f"  {'v' if hooked else 'x'} hook         "
-                   f"{'registered' if hooked else 'not registered, run `rada install`'}")
-        ok &= hooked
+        through = None if hooked else reached_through(s)
+        if hooked:
+            out.append("  v hook         registered")
+        elif through:
+            out.append(f"  v hook         called by {through.replace(os.path.expanduser('~'), '~')}, "
+                       f"which is a correct installation")
+        else:
+            out.append("  x hook         not registered, run `rada install`")
+        ok &= bool(hooked or through)
 
     mode = config().get("mode", "gate")
     out.append(f"  - mode         {mode}"

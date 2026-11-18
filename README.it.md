@@ -103,6 +103,36 @@ accoda dietro di lui, perché un job che non partirà non deve tenere aperta la 
 sé. Forzare un job trattenuto toglie il trattenimento e lo dice; trattenere un job forzato
 annulla la forzatura e lo dice.
 
+### Quando un job non ci sta per niente
+
+Un job che aspetta memoria che nessuno in coda gli restituirà è invisibile: un processo in
+background che scrive su un log che nessuno legge. rada lo dice una volta, dalla
+scrivania, e con Rada.app installata la notifica è dell'app, con un bottone che fa partire
+il job oltre il budget e uno che apre la coda. L'app viene lanciata in background apposta,
+quindi non viene avanti e non apre nessuna finestra: dice la sua e se ne va.
+
+Dalla riga di comando all'app passa il biglietto e nient'altro, con un url
+`rada://stuck/<biglietto>`, e l'app controlla quel biglietto contro la coda vera prima di
+mostrare qualcosa: uno schema di url lo può aprire qualunque pagina di qualunque browser,
+quindi niente di quello che c'è nell'url viene creduto. Senza l'app si ripiega su
+`osascript`, che non ha identità e non ha bottoni.
+
+Due limiti evitano che diventi rumore. Al massimo un avviso ogni dieci minuti per tutta la
+macchina, di qualunque sessione sia il job bloccato: il turno si prende sotto il lucchetto
+della coda, quindi sei sessioni che trovano un job bloccato nello stesso secondo mandano
+una notifica sola, e quella notifica dice quanti altri job non ci stanno. Chi aspetta lo
+stampa comunque ogni volta sul proprio output. E l'app si lancia solo se può davvero
+mostrare la notifica: scrive in `~/.rada/app.json` cosa le ha concesso macOS l'ultima
+volta, e finché non dice concesso o provvisorio la riga di comando usa `osascript` e
+l'app la lascia stare. Con le notifiche spente per Rada, prima l'app partiva a ogni job
+bloccato solo per leggere il rifiuto, e fino al 18/11 poi non si chiudeva: il processo
+restava vivo con la finestra nascosta, e un doppio clic sull'icona arrivava a lui e non
+mostrava niente. Ora ogni uscita di un lancio per avviso chiude l'app, e un clic
+sull'icona riporta sempre la finestra.
+
+Per avere la notifica dell'app, accendi le notifiche per Rada in Impostazioni di Sistema,
+poi apri l'app una volta.
+
 ### I job lasciati indietro da una sessione
 
 ![un job la cui sessione se n'è andata, e cosa tiene ancora](docs/img/05-left-behind.png)
@@ -293,7 +323,11 @@ cd ~/dev/rada
 ./bin/rada install
 ```
 
-Registra un solo hook `PreToolUse`. Gira prima di ogni comando Bash di ogni sessione,
+Registra un hook `PreToolUse`, a meno che qualche altro hook della macchina non stia già
+chiamando `bin/rada-gate`: in quel caso lo dice e lascia stare `settings.json`, perché due
+hook che riscrivono lo stesso comando accoderebbero due volte un job pesante. `rada
+doctor` considera l'essere chiamato dall'hook di qualcun altro un'installazione corretta,
+e lo è. Gira prima di ogni comando Bash di ogni sessione,
 quindi è scritto per fare un fork solo e confrontare con i builtin della shell: circa 3 ms
 sopra il costo di lanciare un hook qualunque, per i comandi che non sono pesanti.
 
@@ -322,7 +356,11 @@ bisogna indicarglielo; un tool compare da solo nell'elenco della sessione. Serve
 `bin/rada-mcp`.
 
 Tre tool: `rada_ask` per chiedere un posto, `rada_queue` per vedere cosa gira e a che
-punto della fila sei, `rada_release` quando il lavoro è finito. Sono la metà di `rada run`
+punto della fila sei, `rada_release` quando il lavoro è finito. `rada_queue` nasce dalla
+stessa funzione della finestra, quindi porta tutto quello che mostra Rada.app: perché ogni
+job aspetta, quali partiranno, quali sono bloccati e chi tiene la loro memoria, i job
+lasciati indietro da una sessione, e cosa troverebbe un job nuovo. Un modello non ha
+motivo di aprire l'app, e il tool glielo dice: la finestra è della persona. Sono la metà di `rada run`
 che ammette e nient'altro, e chiamano `sched.decide`, `sched.order` e `cli.Waiter`
 direttamente, così il biglietto e la decisione non possono divergere da quelli del
 wrapper.

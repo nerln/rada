@@ -601,7 +601,8 @@ def grant(d, tid, pid, pgid, now=None, alone=False):
               f"from_ticket={bool(tk)} pid={pid}")
     d["leases"][tid] = {"need": tk.get("need") or DEFAULT_NEED, "pid": pid, "pgid": pgid,
                         "start": now, "sig": tk.get("sig", ""), "cwd": tk.get("cwd", ""),
-                        "project": tk.get("project", ""), "show": tk.get("show", "")}
+                        "project": tk.get("project", ""), "show": tk.get("show", ""),
+                        "sid": tk.get("sid", "")}
     if (d.get("reserve") or {}).get("id") == tid:
         d["reserve"] = {}
     # When the berth was given without asking the budget, remember when. The next one is

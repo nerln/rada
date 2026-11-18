@@ -37,7 +37,7 @@ import time
 import traceback
 
 from . import mem, sched, sessions, store
-from .cli import Waiter, parse_bytes
+from .cli import Waiter, parse_bytes, picture
 
 PROTOCOL = "2025-06-18"
 SUPPORTED = {"2024-11-05", "2025-03-26", "2025-06-18"}
@@ -102,11 +102,13 @@ TOOLS = [
     {
         "name": "rada_queue",
         "description": (
-            "What is running, what is waiting, where you are in the line, and how much "
-            "memory is actually free. Use it while you hold a ticket to see whether you "
-            "are moving, and before asking a person to wait. A queue whose position you "
-            "cannot see is a black box, and an agent that cannot see it will conclude "
-            "rada is broken and go around it. Same view as `rada status`."),
+            "What is running, what is waiting and why, where you are in the line, which "
+            "jobs are stuck and what holds their memory, and how much is actually free. "
+            "Use it while you hold a ticket to see whether you are moving, and before "
+            "asking a person to wait. It is the same picture Rada.app shows, read from "
+            "the same function, so never open the app to look: that puts a window in "
+            "front of a person for something this call already answers. Same as "
+            "`rada status --json`."),
         "inputSchema": _s("", session=STR,
                           ticket={**STR, "description": "point at one ticket of yours"}),
     },
@@ -187,6 +189,109 @@ def _row(tid, entry, mine):
     return {"ticket": tid, "size": mem.human(entry.get("need")),
             "project": entry.get("project") or "?",
             "command": (entry.get("show") or "")[:80], "yours": mine}
+
+
+def _queue_view(pic, sid, mine_ticket=""):
+    """The window's picture, said in words a model reads, from the same `cli.picture`.
+
+    This used to read the state file on its own and build a thinner view: no reason per
+    job, no list of the jobs the sweep would drop, nothing about what a new job would
+    meet. A model that wanted the reasons had one other place to get them, which was
+    Rada.app, and opening an app is a thing a person sees. Several sessions with stuck
+    jobs each opening it to look was half of why the app seemed to launch itself in
+    bursts. Everything the window shows is here now, so there is no reason to open it.
+    """
+    now = pic["now"]
+
+    def ours(row):
+        tid = row["id"]
+        return tid in MINE or tid == mine_ticket or (
+            bool(sid) and row.get("session") == sid)
+
+    running = [{"ticket": r["id"], "size": mem.human(r.get("need")),
+                "project": r.get("project") or "?",
+                "command": (r.get("command") or "")[:80], "yours": ours(r),
+                "running_seconds": int(r.get("seconds", 0))}
+               for r in pic["running"]]
+
+    waiting = []
+    for r in pic["waiting"]:
+        row = {"ticket": r["id"], "size": mem.human(r.get("need")),
+               "project": r.get("project") or "?",
+               "command": (r.get("command") or "")[:80], "yours": ours(r),
+               "position": r["position"], "waiting_seconds": int(r.get("age", 0)),
+               "will_start": r["will_start"], "why": r["why"]}
+        if r.get("impossible_for_now"):
+            # The one state a person has to act on. Said as a fact about the machine,
+            # because the model reading it cannot force the job and should not try.
+            row["stuck"] = ("cannot fit while other programs hold the memory; only a "
+                            "person can start it past the budget")
+        if r.get("blockers"):
+            row["memory_held_by"] = [f"{b.get('name', '?')} ({mem.human(b.get('bytes'))})"
+                                     for b in r["blockers"][:3]]
+        # Past MANDATORY_AFTER a ticket is ordered by arrival alone and the judge
+        # cannot touch it. That is the promise worth showing, not an internal flag.
+        if r.get("mandatory"):
+            row["ordered_by_arrival_now"] = True
+        if r.get("hold"):
+            row["held_by_a_person"] = True
+        if r.get("force"):
+            row["forced_by_a_person"] = True
+        waiting.append(row)
+
+    yours = [r for r in waiting if r["yours"]]
+    held = [r for r in running if r["yours"]]
+    if yours:
+        you = "; ".join(f"ticket {r['ticket']} is {r['position']} of {len(waiting)}, "
+                        f"waiting {r['waiting_seconds']}s: {r['why']}" for r in yours)
+    elif held:
+        you = "; ".join(f"you hold berth {r['ticket']} ({r['size']}), release it with "
+                        f"rada_release when the job is done" for r in held)
+    else:
+        you = "nothing of yours is queued or running"
+
+    m = pic["memory"]
+    out = {
+        "you": you,
+        "a_new_job_now": pic["standing_aside"]["why"],
+        "memory": {
+            "budget": mem.human(m["budget"]),
+            "promised_to_running_jobs": mem.human(m["promised"]),
+            "free_for_a_new_job": mem.human(m["free"]),
+            "machine_used": f"{mem.human(m['used'])} of {mem.human(m['total'])}",
+            "swap": f"{mem.human(m['swap_used'])} of {mem.human(m['swap_total'])}",
+            "clamped": m["clamped"],
+        },
+        "running": running,
+        "waiting": waiting,
+    }
+    if pic.get("left_behind"):
+        # Jobs whose process has gone. The next call that takes the lock drops them; they
+        # are listed so a model does not wait behind something that is no longer there.
+        out["left_behind"] = [
+            {"ticket": r["id"], "kind": r["kind"], "project": r.get("project") or "?",
+             "command": (r.get("command") or "")[:80],
+             "silent_seconds": int(r.get("silent_for", 0))}
+            for r in pic["left_behind"]]
+    try:
+        # Counted with the caller, as the old view did. The window has no session of its
+        # own, so its line leaves the caller out, and an idle queue with one other session
+        # open would read "one session on its own": the sentence that makes a model decide
+        # the queue is off and skip rada_ask.
+        out["sessions"] = sessions.describe(sid, now=now)
+    except Exception:
+        if pic.get("sessions"):
+            out["sessions"] = pic["sessions"]
+    j = pic.get("judge") or {}
+    if j.get("age") is not None:
+        out["judge"] = f"{int(j['age'])}s ago: {j.get('why') or '(no reason)'}"
+    if any(r.get("stuck") for r in waiting):
+        out["for_the_person"] = (
+            "A stuck job starts past the budget only on a person's word: `rada force "
+            "<ticket>` in a terminal, or the button in Rada.app. Tell them which ticket "
+            "and what holds the memory. Do not open Rada.app for them: this is the same "
+            "view, and rada already sends them one notice.")
+    return out
 
 
 def _decide(tid):
@@ -284,67 +389,7 @@ def call_tool(name: str, args: dict) -> str:
         except store.SchemaMismatch as e:
             return (f"state written by another version of rada ({e.found}); rada is "
                     "standing aside and jobs run ungated")
-        now = time.time()
-        snap = mem.snapshot()
-        com = sched.committed(d)
-
-        def ours(tid, entry):
-            return tid in MINE or tid == mine_ticket or (
-                bool(sid) and entry.get("sid") == sid)
-
-        running = [dict(_row(tid, ls, ours(tid, ls)),
-                        running_seconds=int(now - ls.get("start", now)))
-                   for tid, ls in sorted(d["leases"].items(),
-                                         key=lambda kv: kv[1].get("start", 0))]
-
-        q = sched.order(d, now)
-        waiting = []
-        for i, tid in enumerate(q, 1):
-            tk = d["tickets"][tid]
-            row = _row(tid, tk, ours(tid, tk))
-            row["position"] = i
-            row["waiting_seconds"] = int(now - tk.get("enq", now))
-            # Past MANDATORY_AFTER a ticket is ordered by arrival alone and the judge
-            # cannot touch it. That is the promise worth showing, not an internal flag.
-            if now - tk.get("enq", now) >= sched.MANDATORY_AFTER:
-                row["ordered_by_arrival_now"] = True
-            if tk.get("force"):
-                row["forced_by_a_person"] = True
-            waiting.append(row)
-
-        yours = [r for r in waiting if r["yours"]]
-        held = [r for r in running if r["yours"]]
-        if yours:
-            you = "; ".join(f"ticket {r['ticket']} is {r['position']} of {len(waiting)}, "
-                            f"waiting {r['waiting_seconds']}s" for r in yours)
-        elif held:
-            you = "; ".join(f"you hold berth {r['ticket']} ({r['size']}), release it with "
-                            f"rada_release when the job is done" for r in held)
-        else:
-            you = "nothing of yours is queued or running"
-
-        out = {
-            "you": you,
-            "memory": {
-                "budget": mem.human(snap["budget"]),
-                "promised_to_running_jobs": mem.human(com),
-                "free_for_a_new_job": mem.human(snap["budget"] - com),
-                "machine_used": f"{mem.human(snap['used'])} of {mem.human(mem.TOTAL)}",
-                "swap": f"{mem.human(snap['swap_used'])} of "
-                        f"{mem.human(snap['swap_total'])}",
-                "clamped": snap["clamped"],
-            },
-            "running": running,
-            "waiting": waiting,
-        }
-        try:
-            out["sessions"] = sessions.describe(sid)
-        except Exception:
-            pass
-        j = d.get("judge") or {}
-        if j.get("ts"):
-            out["judge"] = f"{int(now - j['ts'])}s ago: {j.get('why') or '(no reason)'}"
-        return _fmt(out)
+        return _fmt(_queue_view(picture(d), sid, mine_ticket))
 
     if name == "rada_release":
         tid = (args.get("ticket") or "").strip()
@@ -422,7 +467,8 @@ def handle(req: dict) -> None:
                 "Other Claude Code sessions share this machine's memory with you. Before "
                 "starting anything that will hold gigabytes, call rada_ask and wait for "
                 "a berth, then rada_release when the job is done. Ordinary work needs "
-                "none of this."),
+                "none of this. rada_queue shows everything Rada.app shows; do not open "
+                "the app, it is the person's window."),
         })
     elif method == "ping":
         respond(rid, {})

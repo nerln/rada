@@ -2,9 +2,24 @@ import SwiftUI
 
 @main
 struct RadaApp: App {
+    // The delegate exists for the notification rada sends when a job is stuck: the
+    // banner, its two buttons, and the `rada://` url the command line opens to ask for
+    // it. See Alerts.swift.
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+
     var body: some Scene {
         WindowGroup("rada") {
             ContentView()
+                .onAppear {
+                    // `--notice <ticket>` posts the banner and exits, which is how the
+                    // notification is tested from a terminal. Read here rather than in
+                    // an entry point of its own, because SwiftUI owns `main`.
+                    let args = CommandLine.arguments
+                    if let i = args.firstIndex(of: "--notice"), i + 1 < args.count {
+                        delegate.noticeFromCommandLine(ticket: args[i + 1])
+                    }
+                }
+                .onOpenURL { url in delegate.handle(url: url) }
         }
         .windowToolbarStyle(.unified)
         // Wide enough that a command line and its reason are both readable without

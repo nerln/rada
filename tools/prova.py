@@ -1221,6 +1221,216 @@ check("note() writes nothing outside its own directory",
 check("busy() survives an unreadable state", sessions.busy({}) is False)
 
 
+# ------------------------------------------- 9c. the gate called by somebody else's hook
+
+section("9c. rada can be installed without being registered")
+
+wrapper = os.path.join(TMP, "wrapper.py")
+with open(wrapper, "w") as f:
+    f.write("#!/usr/bin/env python3\n# calls rada-gate itself, once\n"
+            "import subprocess\nsubprocess.run(['/somewhere/bin/rada-gate'])\n")
+
+def _settings(command):
+    return {"hooks": {"PreToolUse": [{"matcher": "Bash",
+                                      "hooks": [{"type": "command", "command": command}]}]}}
+
+check("a hook registered as `python3 /path/to/hook.py` is read past the interpreter",
+      setup_claude.reached_through(_settings(f"/usr/bin/python3 {wrapper}")) == wrapper,
+      str(setup_claude.reached_through(_settings(f"/usr/bin/python3 {wrapper}"))))
+check("and as a bare path too",
+      setup_claude.reached_through(_settings(wrapper)) == wrapper)
+
+plain = os.path.join(TMP, "plain.py")
+with open(plain, "w") as f:
+    f.write("print('nothing to do with the queue')\n")
+check("a hook that does not call the gate is not mistaken for one",
+      setup_claude.reached_through(_settings(plain)) is None)
+check("a hook whose file is gone is not an error",
+      setup_claude.reached_through(_settings("/no/such/hook.py")) is None)
+check("rada registered on its own is not 'reached through' anybody",
+      setup_claude.reached_through(_settings("/somewhere/bin/rada-gate")) is None)
+
+# And install must not add a second entry when the gate is already being called, which
+# would have a heavy command ticketed twice, once through each hook.
+import copy  # noqa: E402
+real_settings = setup_claude.SETTINGS
+try:
+    fake = os.path.join(TMP, "settings.json")
+    with open(fake, "w") as f:
+        json.dump(_settings(f"/usr/bin/python3 {wrapper}"), f)
+    before = open(fake).read()
+    setup_claude.SETTINGS = fake
+    said = "\n".join(setup_claude.install())
+    check("install leaves settings alone when the gate is already called",
+          open(fake).read() == before, said[-200:])
+    check("and says who is calling it", wrapper in said, said[-200:])
+finally:
+    setup_claude.SETTINGS = real_settings
+
+
+# ------------------------------------------------- 9b. the notification about a stuck job
+
+section("9b. the notification goes to the app when the app is there")
+
+from rada import cli  # noqa: E402
+
+calls = []
+
+
+class _Done:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
+
+def _record(args, **kw):
+    calls.append(list(args))
+    return _Done()
+
+
+real_run = cli.subprocess.run
+real_app = cli.RADA_APP
+real_every = cli.NOTICE_EVERY
+APP_JSON = os.path.join(TMP, "app.json")
+
+
+def _app_says(status):
+    """What Rada.app last learned from macOS, as the app itself writes it."""
+    if status is None:
+        if os.path.exists(APP_JSON):
+            os.remove(APP_JSON)
+        return
+    with open(APP_JSON, "w") as f:
+        json.dump({"notices": status, "at": time.time()}, f)
+
+
+try:
+    cli.subprocess.run = _record
+    cli.NOTICE_EVERY = 0          # the throttle has its own checks further down
+
+    # With Rada.app installed and allowed to post, the banner is the app's own, and the
+    # ticket is the only thing handed to it.
+    cli.RADA_APP = TMP            # a directory that exists, standing in for the bundle
+    _app_says("granted")
+    calls.clear()
+    cli.notify("rada: a job is stuck", "8f3a has waited 12 min", ticket="8f3a")
+    check("with the app installed and allowed, the notice goes to the app",
+          len(calls) == 1 and calls[0][0] == "open", str(calls)[:160])
+    check("in the background, so nothing comes forward",
+          "-g" in calls[0], str(calls[0])[:160])
+    check("and it carries the ticket and nothing else",
+          calls[0][-1] == "rada://stuck/8f3a", str(calls[0])[:160])
+    check("naming the bundle rather than trusting whoever claims the scheme",
+          "-a" in calls[0] and TMP in calls[0], str(calls[0])[:160])
+    check("a queue outside ~/.rada is passed on, since open does not carry the environment",
+          f"RADA_HOME={TMP}" in calls[0], str(calls[0])[:200])
+
+    # Provisional is macOS saying yes quietly, and it is enough for the centre.
+    _app_says("provisional")
+    calls.clear()
+    cli.notify("rada: a job is stuck", "8f3a", ticket="8f3a")
+    check("provisional permission still goes to the app",
+          calls and calls[0][0] == "open", str(calls)[:120])
+
+    # Refused, or never asked: launching the app could only end in it reading the
+    # refusal. Before 18/11 it did not even quit afterwards, and every stuck job in every
+    # session started it again.
+    _app_says("denied")
+    calls.clear()
+    cli.notify("rada: a job is stuck", "8f3a", ticket="8f3a")
+    check("with notifications refused for Rada, the app is not launched at all",
+          calls and all(c[0] != "open" for c in calls), str(calls)[:160])
+    check("and the person is told the old way instead",
+          len(calls) == 1 and calls[0][0] == "osascript", str(calls)[:160])
+    _app_says(None)
+    calls.clear()
+    cli.notify("rada: a job is stuck", "8f3a", ticket="8f3a")
+    check("an app that has never said what macOS allows is not launched either",
+          len(calls) == 1 and calls[0][0] == "osascript", str(calls)[:160])
+    with open(APP_JSON, "w") as f:
+        f.write("{not json")
+    calls.clear()
+    cli.notify("rada: a job is stuck", "8f3a", ticket="8f3a")
+    check("nor one whose note cannot be read",
+          len(calls) == 1 and calls[0][0] == "osascript", str(calls)[:160])
+
+    # Without the bundle, the old road, and the two strings stay arguments.
+    _app_says("granted")
+    cli.RADA_APP = os.path.join(TMP, "no-such-app")
+    calls.clear()
+    cli.notify("rada: a job is stuck", 'a "quoted" job & others', ticket="8f3a")
+    check("without the app it falls back to osascript",
+          len(calls) == 1 and calls[0][0] == "osascript", str(calls)[:160])
+    check("and the title and body are arguments, never pasted into the script",
+          calls[0][-2:] == ["rada: a job is stuck", 'a "quoted" job & others']
+          and "quoted" not in calls[0][2], str(calls[0])[:200])
+    check("so the script itself reads them from argv",
+          "on run argv" in calls[0][2], str(calls[0][2])[:80])
+
+    # A notice with no ticket has nothing to hand the app.
+    cli.RADA_APP = TMP
+    calls.clear()
+    cli.notify("rada", "something else happened")
+    check("a notice with no ticket does not pretend to be about a job",
+          calls[0][0] == "osascript", str(calls)[:120])
+
+    # And when `open` fails, the person still gets told.
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
+    def _fail_then_record(args, **kw):
+        calls.append(list(args))
+        return _Failed() if args[0] == "open" else _Done()
+
+    cli.subprocess.run = _fail_then_record
+    calls.clear()
+    cli.notify("rada: a job is stuck", "8f3a", ticket="8f3a")
+    check("an app that will not open falls back instead of staying silent",
+          len(calls) == 2 and calls[1][0] == "osascript", str(calls)[:160])
+
+    # One notice per stretch for the whole machine. Six sessions with a stuck job each
+    # used to be six banners and six launches of the app inside a minute.
+    cli.subprocess.run = _record
+    cli.NOTICE_EVERY = 600
+    with store.Transaction() as st:
+        st.d.pop("noticed", None)
+    calls.clear()
+    for t in ("aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff"):
+        cli.notify("rada: a job is stuck", f"{t} has waited", ticket=t)
+    check("six stuck jobs at once produce one notice, not six",
+          len(calls) == 1 and calls[0][-1] == "rada://stuck/aaaa", str(calls)[:200])
+    check("the stretch is recorded in the shared state, so another session sees it",
+          time.time() - float(store.read().get("noticed") or 0) < 5)
+    with store.Transaction() as st:
+        st.d["noticed"] = time.time() - 601
+    calls.clear()
+    cli.notify("rada: a job is stuck", "gggg has waited", ticket="gggg")
+    check("and once the stretch is over the next stuck job is told again",
+          len(calls) == 1 and calls[0][-1] == "rada://stuck/gggg", str(calls)[:160])
+
+    # From separate processes, which is the real case: each session's waiter decides on
+    # its own, and only the lock can make them agree.
+    with store.Transaction() as st:
+        st.d.pop("noticed", None)
+    racer = (f"import sys, os; sys.path.insert(0, {ROOT!r}); "
+             "os.environ['RADA_HOME'] = sys.argv[1]; from rada import cli; "
+             "cli.RADA_APP = '/nonexistent'; out = []; "
+             "cli.subprocess.run = lambda a, **k: out.append(a); "
+             "cli.notify('t', 'b', ticket=sys.argv[2]); print(len(out))")
+    procs = [subprocess.Popen([sys.executable, "-c", racer, TMP, f"{i:04x}"],
+                              stdout=subprocess.PIPE, text=True) for i in range(8)]
+    told = sum(int((p.communicate(timeout=30)[0] or "0").strip() or 0) for p in procs)
+    check("eight sessions finding a stuck job in the same second send one notice",
+          told == 1, f"{told} notices")
+finally:
+    cli.subprocess.run = real_run
+    cli.RADA_APP = real_app
+    cli.NOTICE_EVERY = real_every
+    _app_says(None)
+
+
 # -------------------------------------------------------------------------- summary
 
 section("10. the MCP server is the same queue, reached another way")
@@ -1323,6 +1533,13 @@ check("the tools are ask, queue and release",
       names == ["rada_ask", "rada_queue", "rada_release"], str(names))
 check("force is not one of them: an agent cannot override the budget for itself",
       not any("force" in n for n in names))
+queue_tool = next(t for t in answers[1]["result"]["tools"] if t["name"] == "rada_queue")
+check("the queue tool tells a model the window has nothing more, so it need not open it",
+      "Rada.app" in queue_tool["description"] and "never open" in queue_tool["description"],
+      queue_tool["description"][:200])
+check("and so do the server's instructions",
+      "do not open" in answers[0]["result"].get("instructions", ""),
+      answers[0]["result"].get("instructions", "")[:200])
 check("neither is run: this server admits jobs, it does not execute them",
       not any(n.endswith("_run") for n in names))
 check("nor reset, which would wipe every other session's queue",
@@ -1365,6 +1582,27 @@ check("and the way to check again without taking a second place",
 check("the queue view shows the waiting job with its position",
       view["waiting"] and view["waiting"][0]["position"] == 1
       and view["waiting"][0]["yours"] is True, json.dumps(view.get("waiting"))[:200])
+check("and the reason it is waiting, the same sentence the window shows",
+      bool(view["waiting"][0].get("why")) and view["waiting"][0].get("will_start") is False,
+      json.dumps(view["waiting"][0])[:200])
+check("the caller's own line carries that reason too, so one field answers 'why'",
+      view["waiting"][0]["why"] in view.get("you", ""), str(view.get("you"))[:200])
+check("and what a job arriving now would meet, which the window says above the lists",
+      bool(view.get("a_new_job_now")), str(view.get("a_new_job_now"))[:120])
+check("the berth that went to the first job is shown as running, with its size",
+      view["running"] and view["running"][0]["size"] == "400.0MB",
+      json.dumps(view.get("running"))[:200])
+
+# The sessions line counts the caller. The window has no session and its picture leaves
+# the caller out, so copying that line into this view told a model with one other session
+# open that it was alone, which is the sentence that makes it skip rada_ask.
+fresh()
+seed_other_session("sess-elsewhere")
+answers, _ = mcp(use(1, "rada_queue", session="sess-looking"),
+                 env={"RADA_FAKE_BUDGET": "4G"})
+check("the queue view counts the session asking, as well as the others",
+      body(answers[0]).get("sessions", "").startswith("2 sessions open"),
+      str(body(answers[0]).get("sessions"))[:120])
 
 # Re-checking a ticket must not enqueue a second one, or an agent that waits politely
 # would fill the queue with copies of itself and outrank everybody by weight of numbers.

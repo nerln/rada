@@ -102,6 +102,35 @@ memory reservation and nothing queues behind it, because a job that is not going
 must not hold the machine open for itself. Forcing a held job lifts the hold and says so;
 holding a forced job cancels the force and says so.
 
+### When a job cannot fit at all
+
+A job waiting for memory that nothing in the queue is going to free is invisible: a
+background process writing to a log nobody reads. rada says so once, through the desktop,
+and with Rada.app installed the banner is the app's own, with a button that starts the job
+past the budget and a button that opens the queue. The app is launched in the background
+for it, so nothing comes forward and no window opens; it says its piece and quits.
+
+What the command line hands the app is the ticket and nothing else, through a
+`rada://stuck/<ticket>` url, and the app checks that ticket against the real queue before
+showing anything: a url scheme is openable by any page in any browser, so nothing in the
+url is believed. Without the app, the notification falls back to `osascript`, which has no
+identity and no buttons.
+
+Two limits keep this from becoming noise. One notice at most every ten minutes for the
+whole machine, whichever session's job got stuck: the claim is taken under the queue's own
+lock, so six sessions finding a stuck job in the same second send one banner, and that
+banner says how many other jobs cannot fit either. The waiter still prints it on its own
+output every time. And the app is launched only when it can actually post: it writes
+`~/.rada/app.json` with what macOS last allowed it, and until that says granted or
+provisional the command line uses `osascript` and leaves the app alone. With notifications
+turned off for Rada, the app used to be started for every stuck job only to read the
+refusal, and until 18/11 it did not quit afterwards: the process stayed alive with its
+window hidden, and a double click on the icon reached it and showed nothing. Every exit of
+a notice launch now quits, and a click on the icon always brings the window back.
+
+To get the app's own banner, turn notifications on for Rada in System Settings, then open
+the app once.
+
 ### Jobs a session left behind
 
 ![a job whose session went away, and what it is still holding](docs/img/05-left-behind.png)
@@ -285,7 +314,10 @@ cd ~/dev/rada
 ./bin/rada install
 ```
 
-That registers one `PreToolUse` hook. It runs before every Bash command in every session,
+That registers one `PreToolUse` hook, unless some other hook on the machine is calling
+`bin/rada-gate` already: then it says so and leaves `settings.json` alone, because two
+hooks rewriting the same command would ticket a heavy job twice. `rada doctor` reports
+being called by somebody else's hook as a correct installation, which it is. It runs before every Bash command in every session,
 so it is written to fork once and match with shell builtins: about 3 ms on top of the cost
 of starting any hook at all, for commands that are not heavy.
 
@@ -313,7 +345,11 @@ that does not know the queue exists will never ask. A command has to be pointed 
 tool appears in the session's tool list on its own. That is what `bin/rada-mcp` is for.
 
 Three tools: `rada_ask` for a berth, `rada_queue` for what is running and where you are
-in the line, `rada_release` when the job is done. They are the admission half of `rada
+in the line, `rada_release` when the job is done. `rada_queue` is built from the same
+function as the window, so it carries everything Rada.app shows: the reason each job is
+waiting, which ones will start, which are stuck and what holds their memory, the jobs a
+session left behind, and what a new job would meet. A model has no reason to open the app,
+and the tool says so: the window is the person's. They are the admission half of `rada
 run` and nothing else, calling `sched.decide`, `sched.order` and `cli.Waiter` directly so
 the ticket and the decision cannot drift from the wrapper's.
 

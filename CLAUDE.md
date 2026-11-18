@@ -116,7 +116,7 @@ rada/setup_claude.py  install, uninstall, doctor
 macapp/            la finestra: SwiftUI, macOS 14+, nessuna dipendenza, niente .xcodeproj
 rada/mcp.py        ask, queue, release come tool MCP: ammissione senza esecuzione
 bin/rada-mcp       il server MCP, lo lancia Claude Code
-tools/prova.py     212 controlli, un paio di secondi, nessun modello caricato
+tools/prova.py     245 controlli, un paio di secondi, nessun modello caricato
 tools/schermate.py rigenera le immagini a terminale del README da output vero
 tools/schermate-app.sh  fotografa la finestra sulla stessa coda inventata
 tools/prova-giudice.py  prova viva di resistenza all'iniezione, chiama il modello
@@ -182,6 +182,19 @@ codice spiegano **perché**, non cosa.
   svuotata e quindi l'attesa non raddoppiava mai, e `head_need` era letto come 0 invece
   che con la soglia `DEFAULT_NEED`, così chi si infila sotto poteva mangiare la quota
   tenuta. Sezione 7e di `tools/prova.py`. Se tocchi quel ramo, quei test sono la rete.
+- **Essere chiamato dall'hook di un altro è un'installazione corretta.** Su questa
+  macchina `rada-gate` lo chiama `~/.claude/hooks/no-cd-persist.py` (v2), che è il punto
+  d'ingresso unico apposta: la v1 si faceva da parte per i pattern pesanti di rada e un
+  comando passava non avvolto, perché rada risponde `{}` quando il job può partire
+  subito. Registrare `rada-gate` a parte in settings.json accoderebbe due volte un job
+  pesante, e sta scritto nell'intestazione di quel file. Quindi `setup_claude.reached_through`
+  legge i comandi degli hook registrati (ogni parola che nomina un file leggibile, non
+  solo la prima, o si trova l'interprete invece dello script) e cerca chi nomina
+  `rada-gate`: `doctor` lo riporta come installazione corretta e `install` si rifiuta di
+  registrarsi una seconda volta. Sezione 9c di `tools/prova.py`. Misurato il 21/10/2026:
+  il gate costa 3,2 ms oltre il costo di far partire un hook qualunque (7,4 ms contro
+  10,6, mediana su 40 giri) e per un comando non pesante stampa `{}`, quindi non mette
+  niente nel contesto del modello.
 - **Il sito sta in `docs/`** e lo serve GitHub Pages da `master`. `docs/brand.md` tiene
   il marchio e i colori; `docs/img/mark.svg` e `macapp/Tools/make-icon.swift` sono lo
   stesso disegno in due linguaggi e vanno cambiati insieme.
@@ -200,3 +213,53 @@ codice spiegano **perché**, non cosa.
 - Non far uccidere niente a rada. Se un job tiene memoria per sempre, rada lo dice e
   aspetta.
 - Non promettere un limite in secondi.
+
+## App installata in /Applications
+
+La copia che l'utente usa sta in `/Applications/Rada.app`. La copia in
+`~/dev/rada/macapp/Rada.app` resta dov'è: è quella che produce `macapp/build.sh` e quella
+che fotografa `tools/schermate-app.sh`.
+
+- Dopo ogni build che l'utente deve usare, lancia
+  `~/.local/bin/installa-app ~/dev/rada/macapp/Rada.app`. Copia la app, verifica che il
+  cdhash sia identico e la registra. Si ferma se la copia installata è aperta.
+- Rada.app non chiede permessi di privacy (nessun entitlement, non legge cartelle
+  protette), quindi una build nuova non fa perdere niente. `build.sh` la firma con la
+  prima identità Apple Development della macchina (ad-hoc solo se non ce n'è), perché
+  una firma ad-hoc non ha team e le notifiche vengono negate in partenza.
+- La app trova la CLI da sola: `RADA_BIN`, poi il PATH, poi `~/.local/bin/rada`
+  (`Cli.swift`). Il link `~/.local/bin/rada` -> `~/dev/rada/bin/rada` lo usano gli hook di
+  Claude e `installa-app` non lo tocca. Non spostarlo.
+
+## L'app non si apre da una sessione
+
+- Mai `open -a Rada`, `open Rada.app` o il binario da una sessione, nemmeno per provare:
+  la finestra viene avanti sul Mac di Eugenio, che può stare facendo prove con utenti
+  (18/11/2026). Le prove si fanno da terminale: `rada status --json`, `rada_queue`,
+  `swift test`, e per il ramo degli avvisi `open -g --env RADA_NOTICE_OUT=<file> -a
+  /Applications/Rada.app rada://stuck/<id>`, che non porta niente in primo piano e deve
+  uscire entro tre secondi. Anche questo lancia l'app: mentre Eugenio ha qualcuno davanti
+  allo schermo, chiediglielo prima.
+- Lanciata per un avviso, l'app deve chiudersi in ogni ramo. `announce` è
+  `deliver` più la chiusura, apposta: prima tre rami tornavano senza chiudere e il
+  processo restava vivo, invisibile, e ogni doppio clic andava a lui. Un ramo nuovo va
+  dentro `deliver`, mai in `announce`.
+- Restare o andarsene dipende da `personSeen`, che diventa vero solo quando l'app è
+  attiva (una persona l'ha aperta o portata avanti; `open -g` non la attiva mai). Prima
+  decideva un orologio di cinque secondi, e sbagliava nei due versi: un avvio rallentato
+  dallo swap restava aperto per sempre con finestra e Dock, e la finestra appena aperta
+  da una persona poteva sparire perché nello stesso momento arrivava un avviso. Le reti
+  sotto: `stepBack` chiude comunque dopo 20 s, e un processo che nessuno ha mai attivato
+  esce dopo 12 s (non in modalità `--shot` o `--notice`). Il bottone «Start it anyway»
+  rilancia l'app in background, e anche quel lancio si fa da parte ed esce.
+- L'url arriva a `handle(url:)` da un gestore Apple Event messo in
+  `applicationWillFinishLaunching`, prima che SwiftUI lo veda: lasciato a SwiftUI, un url
+  verso un'app aperta può aprire una finestra nuova. `onOpenURL` resta come seconda
+  strada, e il doppione si scarta per biglietto entro tre secondi.
+- La riga di comando passa un avviso all'app solo se `~/.rada/app.json` dice granted o
+  provisional, e al massimo uno ogni `NOTICE_EVERY` (600 s) per tutta la macchina, con il
+  turno nella chiave `noticed` di state.json sotto il lucchetto. Non togliere nessuno dei
+  due: senza, sei sessioni con un job bloccato erano sei lanci dell'app nello stesso
+  minuto.
+- `rada_queue` deve restare la stessa immagine della finestra (`cli.picture`). Se la
+  finestra mostra un campo nuovo, va anche lì: un modello che non lo trova apre l'app.

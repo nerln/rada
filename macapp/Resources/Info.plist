@@ -27,6 +27,21 @@
     <!-- The window shows a queue and quitting it decides nothing. Terminating while a
          job is queued or running is not a state worth protecting against: the queue is a
          file, and the processes waiting on it are other people's. -->
+    <!-- Opened by the command line with `open -g rada://stuck/<ticket>` when a job has
+         been waiting for memory nothing is going to free. The ticket is the only thing
+         the url carries, it is checked against the queue before anything is shown, and
+         it can never be a command: any page in any browser can open a url scheme. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>dev.nerelli.rada</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>rada</string>
+            </array>
+        </dict>
+    </array>
     <key>NSSupportsAutomaticTermination</key>
     <true/>
     <key>NSSupportsSuddenTermination</key>
