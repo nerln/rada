@@ -250,8 +250,25 @@ che fotografa `tools/schermate-app.sh`.
   dallo swap restava aperto per sempre con finestra e Dock, e la finestra appena aperta
   da una persona poteva sparire perché nello stesso momento arrivava un avviso. Le reti
   sotto: `stepBack` chiude comunque dopo 20 s, e un processo che nessuno ha mai attivato
-  esce dopo 12 s (non in modalità `--shot` o `--notice`). Il bottone «Start it anyway»
+  e che non ha finestre sullo schermo esce dopo 12 s (non in modalità `--shot` o
+  `--notice`). Il bottone «Start it anyway»
   rilancia l'app in background, e anche quel lancio si fa da parte ed esce.
+- Un avvio che nessuno ha chiesto di vedere tiene la finestra nascosta finché una persona
+  non attiva l'app. Misurato il 18/11 campionando la lista delle finestre ogni decimo di
+  secondo: l'url arriva prima della fine dell'avvio, e la finestra che SwiftUI crea dopo
+  restava sullo schermo per un secondo e mezzo. Ora in `applicationDidFinishLaunching` un
+  avvio non di default e non attivo mette via le finestre, un osservatore di
+  `didUpdate` mette via quelle che compaiono dopo, e `applicationDidBecomeActive` le
+  ridà. Non quando la persona ha già chiesto: un doppio clic che arriva durante l'avvio
+  viene prima, e rinascondere lì lasciava l'app davanti senza finestra.
+- `comeForward` cerca la finestra per `titled` e `canBecomeKey`, non per
+  `canBecomeMain`: una finestra messa via mentre l'app era accessory risponde false a
+  quello finché non torna sullo schermo, e il filtro non trovava niente.
+- La prova dal vivo che ha trovato questi due difetti (18/11): lancio per avviso tre
+  volte, lancio da persona, doppio clic a 0,3, 0,6, 1,0 e 1,6 secondi da un lancio per
+  avviso, doppio clic e avviso con la finestra aperta, lancio in background senza url.
+  Si ripete con `open` verso `macapp/Rada.app` e `osascript -l JavaScript
+  tools/finestre-rada.js 4`, che campiona le finestre e non chiede permessi.
 - L'url arriva a `handle(url:)` da un gestore Apple Event messo in
   `applicationWillFinishLaunching`, prima che SwiftUI lo veda: lasciato a SwiftUI, un url
   verso un'app aperta può aprire una finestra nuova. `onOpenURL` resta come seconda

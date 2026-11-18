@@ -64,6 +64,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var personSeen = false
     private var launchedForNotice = false
     private var askedPerson = false
+    /// Windows put away at launch because nobody had asked to see them yet.
+    private var hiddenUntilSeen = false
     private var lastTicket: (id: String, at: Date)?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -104,6 +106,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let isDefault = notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool
+        Self.report("finished launching: default=\(String(describing: isDefault)) "
+                    + "active=\(NSApp.isActive) windows=\(NSApp.windows.count) "
+                    + "visible=\(NSApp.windows.filter(\.isVisible).count)")
+
+        // A launch nobody asked to see keeps its window to itself until somebody does.
+        //
+        // Measured on 18/11 with the window list sampled every tenth of a second: the
+        // url of a notice reaches the app before it has finished launching, so the
+        // window was put away before it existed, and the one SwiftUI made a moment later
+        // stayed on screen for a second and a half on top of whatever the person was
+        // doing. Here the window exists and has not been drawn yet. A launch for a url
+        // or for a button on a banner is not a default launch and does not make the app
+        // active; a person's launch is either default or becomes active straight away,
+        // and `applicationDidBecomeActive` gives the window back.
+        //
+        // Not when a person already asked: a double click that lands while the launch
+        // is still under way arrives before this, and putting the window away here then
+        // left the app in front of them with no window at all (measured on 18/11).
+        if !personSeen && !NSApp.isActive && (launchedForNotice || isDefault == false) {
+            hiddenUntilSeen = true
+            putWindowsAway()
+            Self.report("windows kept back until somebody looks")
+        }
+        // SwiftUI can make its window after this point too, so every pass of the event
+        // loop puts away whatever appeared, for as long as nobody is looking.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didUpdateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.personSeen,
+                      self.hiddenUntilSeen || self.launchedForNotice else { return }
+                self.putWindowsAway()
+            }
+        }
         // A process nobody ever looked at has no reason to exist after a few seconds.
         // Whatever started it in the background (a notice, a button pressed on an old
         // banner, a url SwiftUI did not pass on) has had time to do its work by then.
@@ -114,7 +151,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard !scripted else { return }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 12_000_000_000)
-            if !personSeen && !NSApp.isActive {
+            // A window on screen is not a ghost, whoever launched it: somebody can click
+            // it. Only a process with nothing to show and nobody looking leaves.
+            if !personSeen && !NSApp.isActive && !NSApp.windows.contains(where: \.isVisible) {
                 Self.report("nobody opened this window; leaving")
                 NSApp.terminate(nil)
             }
@@ -130,8 +169,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// front of it, it asks for the ordinary kind, which is when a dialog is a reasonable
     /// thing to see, and which is what turns later notices into banners.
     func applicationDidBecomeActive(_ notification: Notification) {
+        Self.report("became active, hidden=\(hiddenUntilSeen)")
         personSeen = true
         launchedForNotice = false
+        if hiddenUntilSeen || !NSApp.windows.contains(where: \.isVisible) {
+            hiddenUntilSeen = false
+            comeForward()
+        }
         guard !askedPerson else { return }
         askedPerson = true
         Task { @MainActor in
@@ -165,7 +209,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return
         }
         lastTicket = (ticket, Date())
-        Self.report("url for \(ticket)")
+        Self.report("url for \(ticket) active=\(NSApp.isActive) "
+                    + "visible=\(NSApp.windows.filter(\.isVisible).count)")
         if unseen { stepBack() }
         Task { await announce(ticket: ticket) }
     }
@@ -183,10 +228,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     /// Out of the way: window hidden rather than closed, so pressing "Open the queue"
     /// has something to bring back, and no Dock icon for a banner nobody asked to see.
+    private func putWindowsAway() {
+        for window in NSApp.windows where window.isVisible { window.orderOut(nil) }
+    }
+
     private func stepBack() {
         launchedForNotice = true
         NSApp.setActivationPolicy(.accessory)
-        for window in NSApp.windows { window.orderOut(nil) }
+        putWindowsAway()
         // However the work in between ends, a process in this state does not outlive it
         // by long. `announce` quits after its banner; this is for anything that hangs.
         Task { @MainActor in
@@ -204,7 +253,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// was none, so AppKit makes a new one then and never a second one beside it.
     func applicationShouldHandleReopen(_ sender: NSApplication,
                                        hasVisibleWindows flag: Bool) -> Bool {
-        !comeForward()
+        let shown = comeForward()
+        Self.report("reopen: window \(shown ? "brought back" : "missing, AppKit makes one")")
+        return !shown
     }
 
     /// Back in front, as an ordinary app. True when there was a window to show.
@@ -212,9 +263,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func comeForward() -> Bool {
         personSeen = true
         launchedForNotice = false
+        hiddenUntilSeen = false
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        let windows = NSApp.windows.filter { $0.canBecomeMain && $0.styleMask.contains(.titled) }
+        // Not `canBecomeMain`: a window put away while the app was an accessory answers
+        // false to that until it is on screen again, and filtering on it found nothing,
+        // so a double click made the app active with no window at all (18/11).
+        let windows = NSApp.windows.filter { $0.styleMask.contains(.titled) && $0.canBecomeKey }
         guard let window = windows.first(where: { $0.title == "rada" }) ?? windows.first
         else { return false }
         window.makeKeyAndOrderFront(nil)
@@ -345,6 +400,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         noticed = true
         launchedForNotice = true
         NSApp.setActivationPolicy(.accessory)
+        putWindowsAway()
         Task { @MainActor in
             let outcome = await announce(ticket: ticket)
             print(outcome)
